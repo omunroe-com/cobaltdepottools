@@ -32,7 +32,7 @@ if [ $CYGWIN = 0 ]; then
   cmd /c `cygpath -w "$base_dir/bootstrap/win/win_tools.bat"`
 fi
 
-CANONICAL_GIT_URL="https://chromium.googlesource.com/chromium/tools/depot_tools.git"
+CANONICAL_GIT_URL="https://lbshell-internal.googlesource.com/depot_tools.git"
 
 SVN="svn"
 if [ -d "$base_dir/svn_bin" -a $MINGW = 0 ]; then

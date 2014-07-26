@@ -19,7 +19,7 @@ IF %~nx0==update_depot_tools.bat (
 set DEPOT_TOOLS_DIR=%1
 SHIFT
 
-set GIT_URL=https://chromium.googlesource.com/chromium/tools/depot_tools.git
+set GIT_URL=https://lbshell-internal.googlesource.com/depot_tools.git
 
 :: Will download git, svn and python.
 call "%DEPOT_TOOLS_DIR%bootstrap\win\win_tools.bat"
