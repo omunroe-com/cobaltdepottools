@@ -278,6 +278,7 @@ class Settings(object):
     self.viewvc_url = None
     self.updated = False
     self.is_gerrit = None
+    self.is_gerrit_autodetect_branch = None
     self.git_editor = None
     self.project = None
 
@@ -426,6 +427,13 @@ class Settings(object):
     if self.is_gerrit is None:
       self.is_gerrit = self._GetConfig('gerrit.host', error_ok=True)
     return self.is_gerrit
+
+  def GetIsGerritAutoDetectBranch(self):
+    """Return true if the remote branch should be auto-detected."""
+    if self.is_gerrit_autodetect_branch is None:
+      self.is_gerrit_autodetect_branch = self._GetConfig(
+          'gerrit.autodetect-branch', error_ok=True)
+    return self.is_gerrit_autodetect_branch
 
   def GetGitEditor(self):
     """Return the editor specified in the git config, or None if none is."""
@@ -1089,6 +1097,10 @@ def LoadCodereviewSettingsFromFile(fileobj):
   if 'GERRIT_HOST' in keyvals:
     RunGit(['config', 'gerrit.host', keyvals['GERRIT_HOST']])
 
+  if 'GERRIT_AUTODETECT_BRANCH' in keyvals:
+    RunGit(['config', 'gerrit.autodetect-branch',
+            keyvals['GERRIT_AUTODETECT_BRANCH']])
+
   if 'PUSH_URL_CONFIG' in keyvals and 'ORIGIN_URL_CONFIG' in keyvals:
     #should be of the form
     #PUSH_URL_CONFIG: url.ssh://gitrw.chromium.org.pushinsteadof
@@ -1513,7 +1525,16 @@ def GerritUpload(options, args, cl):
   # It is probably not worthwhile to support different workflows.
   remote = 'origin'
   branch = 'master'
+
+  if settings.GetIsGerritAutoDetectBranch() == 'true':
+    retcode, result = RunGitWithCode(['rev-parse', '--abbrev-ref', '@{u}'])
+    if retcode != 0:
+      print('Unable to auto-detect remote branch.')
+      return 1
+    remote, branch = result.strip().split('/')
+
   if options.target_branch:
+    remote = 'origin'
     branch = options.target_branch
 
   change_desc = ChangeDescription(
@@ -1531,7 +1552,9 @@ def GerritUpload(options, args, cl):
     print('git log %s/%s..' % (remote, branch))
     print('You can also use `git squash-branch` to squash these into a single'
           'commit.')
-    ask_for_data('About to upload; enter to confirm.')
+    if ask_for_data('About to upload; enter \'yes\' to confirm: ') != 'yes':
+      print('Aborting...')
+      return 0
 
   if options.reviewers:
     change_desc.update_reviewers(options.reviewers)
