@@ -40,6 +40,10 @@ if [ -e "$base_dir/git.bat" -a $MINGW = 0 ]; then
   GIT="cmd.exe //c git.bat"
 fi
 
+if [ -e "$base_dir/git.bat" -a $CYGWIN = 0 ]; then
+  GIT="cmd.exe /C git.bat"
+fi
+
 # Test git and git --version.
 function test_git {
   local GITV

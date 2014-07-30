@@ -145,8 +145,8 @@ if errorlevel 1 goto :GIT_FAIL
 if not exist "%WIN_TOOLS_ROOT_DIR%\%GIT_BIN_DIR%\." goto :GIT_FAIL
 del "%ZIP_DIR%\git.zip"
 :: Ensure autocrlf and filemode are set correctly.
-call "%WIN_TOOLS_ROOT_DIR%\git.bat" config --system core.autocrlf false
-call "%WIN_TOOLS_ROOT_DIR%\git.bat" config --system core.filemode false
+call "%WIN_TOOLS_ROOT_DIR%\%GIT_BIN_DIR%\cmd\git.cmd" config --system core.autocrlf false
+call "%WIN_TOOLS_ROOT_DIR%\%GIT_BIN_DIR%\cmd\git.cmd" config --system core.filemode false
 goto :GIT_COPY_BATCH_FILES
 
 
