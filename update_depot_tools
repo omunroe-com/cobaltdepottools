@@ -16,13 +16,9 @@ fi
 OUTPUT="$(uname | grep 'MINGW')"
 MINGW=$?
 
-if [ $MINGW = 0 ]; then
-  base_dir="${0%\\*}"
-else
-  base_dir=$(dirname "$0")
-  if [ -L "$base_dir" ]; then
-    base_dir=`cd "$base_dir" && pwd -P`
-  fi
+base_dir=$(dirname "$0")
+if [ -L "$base_dir" ]; then
+  base_dir=`cd "$base_dir" && pwd -P`
 fi
 
 # Don't try to use Cygwin tools.  Get real win32 tools using the batch script.
@@ -41,7 +37,7 @@ fi
 
 GIT="git"
 if [ -e "$base_dir/git.bat" -a $MINGW = 0 ]; then
-  GIT="cmd.exe //c \"$base_dir\\git.bat\""
+  GIT="cmd.exe //c git.bat"
 fi
 
 # Test git and git --version.
