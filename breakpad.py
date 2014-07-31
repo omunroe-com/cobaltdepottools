@@ -40,6 +40,12 @@ IS_ENABLED = (
     _HOST_NAME.endswith(('.google.com', '.chromium.org')))
 
 
+# TODO(uzhilinsky): Disable breakpad to avoid spamming the Chromium team.
+# Eventually this should be re-enabled and the exceptions should be forwarded
+# to our own server.
+IS_ENABLED = False
+
+
 def post(url, params):
   """HTTP POST with timeout when it's supported."""
   if not IS_ENABLED:
