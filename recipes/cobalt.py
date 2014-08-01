@@ -14,12 +14,12 @@ class Cobalt(recipe_util.Recipe):
 
   @staticmethod
   def fetch_spec(props):
-    ref = 'remotes/origin/TEST'
+    ref = 'remotes/origin/COBALT'
     url = 'https://lbshell-internal.googlesource.com/chromium.git@%s' % ref
     solution = { 'name'   :'src',
                  'url'    : url,
                  'deps_file': 'DEPS',
-                 'managed'   : False,
+                 'managed'   : True,
                  'custom_deps': {},
                  'safesync_url': '',
     }
