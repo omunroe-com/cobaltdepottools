@@ -312,8 +312,10 @@ class GitWrapper(SCMWrapper):
       return
     for f in os.listdir(hook_dir):
       if not f.endswith('.sample') and not f.endswith('.disabled'):
-        os.rename(os.path.join(hook_dir, f),
-                  os.path.join(hook_dir, f + '.disabled'))
+        dest_name = os.path.join(hook_dir, f + '.disabled')
+        if os.path.exists(dest_name):
+          os.remove(dest_name)
+        os.rename(os.path.join(hook_dir, f), dest_name)
 
   def update(self, options, args, file_list):
     """Runs git to update or transparently checkout the working copy.
