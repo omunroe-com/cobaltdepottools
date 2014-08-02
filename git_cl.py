@@ -1163,6 +1163,8 @@ def CMDconfig(parser, args):
   parser.add_option('--deactivate-update', action='store_true',
                     help='deactivate auto-updating [rietveld] section in '
                          '.git/config')
+  parser.add_option('--reload', action='store_true',
+                    help='reloads the configuration for this tree')
   options, args = parser.parse_args(args)
 
   if options.deactivate_update:
@@ -1173,18 +1175,23 @@ def CMDconfig(parser, args):
     RunGit(['config', '--unset', 'rietveld.autoupdate'])
     return
 
-  if len(args) == 0:
+  if len(args) == 0 and not options.reload:
     GetCodereviewSettingsInteractively()
     DownloadHooks(True)
     return 0
 
-  url = args[0]
-  if not url.endswith('codereview.settings'):
-    url = os.path.join(url, 'codereview.settings')
+  if options.reload:
+    cr_settings_file = FindCodereviewSettingsFile()
+  else:
+    url = args[0]
+    if not url.endswith('codereview.settings'):
+      url = os.path.join(url, 'codereview.settings')
+    cr_settings_file = urllib2.urlopen(url)
 
   # Load code review settings and download hooks (if available).
-  LoadCodereviewSettingsFromFile(urllib2.urlopen(url))
-  DownloadHooks(True)
+  if cr_settings_file:
+    LoadCodereviewSettingsFromFile(cr_settings_file)
+    DownloadHooks(True)
   return 0
 
 
@@ -1552,8 +1559,7 @@ def GerritUpload(options, args, cl):
     print('git log %s/%s..' % (remote, branch))
     print('You can also use `git squash-branch` to squash these into a single'
           'commit.')
-    if ask_for_data('About to upload; enter \'yes\' to confirm: ') != 'yes':
-      print('Aborting...')
+    if ask_for_data('About to upload; continue (y/N)? ').lower() != 'y':
       return 0
 
   if options.reviewers:
