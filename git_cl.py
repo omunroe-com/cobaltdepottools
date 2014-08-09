@@ -1195,6 +1195,7 @@ def CMDconfig(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDbaseurl(parser, args):
   """Gets or sets base-url for this branch."""
   branchref = RunGit(['symbolic-ref', 'HEAD']).strip()
@@ -1210,6 +1211,7 @@ def CMDbaseurl(parser, args):
                   error_ok=False).strip()
 
 
+@subcommand.hidden
 def CMDstatus(parser, args):
   """Show status of changelists.
 
@@ -1361,6 +1363,7 @@ def colorize_CMDstatus_doc():
   CMDstatus.__doc__ = '\n'.join(colorize_line(l) for l in lines)
 
 
+@subcommand.hidden
 @subcommand.usage('[issue_number]')
 def CMDissue(parser, args):
   """Sets or displays the current code review issue number.
@@ -1381,6 +1384,7 @@ def CMDissue(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDcomments(parser, args):
   """Shows review comments of the current changelist."""
   (_, args) = parser.parse_args(args)
@@ -1407,6 +1411,7 @@ def CMDcomments(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDdescription(parser, args):
   """Brings up the editor for the current CL's description."""
   cl = Changelist()
@@ -1487,8 +1492,8 @@ def CMDlint(parser, args):
 
 def CMDpresubmit(parser, args):
   """Runs presubmit tests on the current changelist."""
-  parser.add_option('-u', '--upload', action='store_true',
-                    help='Run upload hook instead of the push/dcommit hook')
+  parser.add_option('-c', '--commit', action='store_true',
+                    help='Run commit hook instead of the upload hook')
   parser.add_option('-f', '--force', action='store_true',
                     help='Run checks even if tree is dirty')
   (options, args) = parser.parse_args(args)
@@ -1505,7 +1510,7 @@ def CMDpresubmit(parser, args):
     base_branch = cl.GetCommonAncestorWithUpstream()
 
   cl.RunHook(
-      committing=not options.upload,
+      committing=options.commit,
       may_prompt=False,
       verbose=options.verbose,
       change=cl.GetChange(base_branch, None))
@@ -2081,6 +2086,7 @@ def SendUpstream(parser, args, cmd):
   return 0
 
 
+@subcommand.hidden
 @subcommand.usage('[upstream branch to apply against]')
 def CMDdcommit(parser, args):
   """Commits the current changelist via git-svn."""
@@ -2097,6 +2103,7 @@ will instead be silently ignored."""
   return SendUpstream(parser, args, 'dcommit')
 
 
+@subcommand.hidden
 @subcommand.usage('[upstream branch to apply against]')
 def CMDland(parser, args):
   """Commits the current changelist via git."""
@@ -2107,6 +2114,7 @@ def CMDland(parser, args):
   return SendUpstream(parser, args, 'push')
 
 
+@subcommand.hidden
 @subcommand.usage('<patch url or issue id>')
 def CMDpatch(parser, args):
   """Patches in a code review."""
@@ -2205,6 +2213,7 @@ def PatchIssue(issue_arg, reject, nocommit, directory):
   return 0
 
 
+@subcommand.hidden
 def CMDrebase(parser, args):
   """Rebases current branch on top of svn repo."""
   # Provide a wrapper for git svn rebase to help avoid accidental
@@ -2240,6 +2249,7 @@ def GetTreeStatusReason():
   return status['message']
 
 
+<<<<<<< HEAD
 def GetBuilderMaster(bot_list):
   """For a given builder, fetch the master from AE if available."""
   map_url = 'https://builders-map.appspot.com/'
@@ -2271,6 +2281,9 @@ def GetBuilderMaster(bot_list):
   return result_master, None
 
 
+=======
+@subcommand.hidden
+>>>>>>> git-cl workflow adjustments
 def CMDtree(parser, args):
   """Shows the status of the tree."""
   _, args = parser.parse_args(args)
@@ -2287,6 +2300,7 @@ def CMDtree(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDtry(parser, args):
   """Triggers a try job through Rietveld."""
   group = optparse.OptionGroup(parser, "Try job options")
@@ -2462,6 +2476,7 @@ def CMDupstream(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDweb(parser, args):
   """Opens the current CL in the web browser."""
   _, args = parser.parse_args(args)
@@ -2477,6 +2492,7 @@ def CMDweb(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDset_commit(parser, args):
   """Sets the commit bit to trigger the Commit Queue."""
   _, args = parser.parse_args(args)
@@ -2490,6 +2506,7 @@ def CMDset_commit(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDset_close(parser, args):
   """Closes the issue."""
   _, args = parser.parse_args(args)
@@ -2502,6 +2519,7 @@ def CMDset_close(parser, args):
   return 0
 
 
+@subcommand.hidden
 def CMDdiff(parser, args):
   """shows differences between local tree and last upload."""
   cl = Changelist()
@@ -2687,6 +2705,10 @@ def main(argv):
   # Reload settings.
   global settings
   settings = Settings()
+
+  # All Rietveld only commands are marked as hidden. Unhide them if not using
+  # Gerrit, to restore the default behavior.
+  subcommand.SHOW_HIDDEN_COMMANDS = not settings.GetIsGerrit()
 
   colorize_CMDstatus_doc()
   dispatcher = subcommand.CommandDispatcher(__name__)

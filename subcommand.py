@@ -44,6 +44,16 @@ import sys
 import textwrap
 
 
+# If set to true, will show hidden commands in help.
+SHOW_HIDDEN_COMMANDS = False
+
+
+def hidden(cmd):
+  """Decorator that hides a CMD function from being shown in help."""
+  cmd.hidden = True
+  return cmd
+
+
 def usage(more):
   """Adds a 'usage_more' property to a CMD function."""
   def hook(fn):
@@ -152,6 +162,10 @@ class CommandDispatcher(object):
   def _gen_commands_list(self):
     """Generates the short list of supported commands."""
     commands = self.enumerate_commands()
+    if not SHOW_HIDDEN_COMMANDS:
+      commands = dict(
+        (name, handler) for name, handler in commands.iteritems()
+        if not getattr(handler, 'hidden', None))
     docs = sorted(
         (name, self._create_command_summary(name, handler))
         for name, handler in commands.iteritems())
