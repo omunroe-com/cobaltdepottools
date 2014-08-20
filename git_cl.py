@@ -2249,7 +2249,6 @@ def GetTreeStatusReason():
   return status['message']
 
 
-<<<<<<< HEAD
 def GetBuilderMaster(bot_list):
   """For a given builder, fetch the master from AE if available."""
   map_url = 'https://builders-map.appspot.com/'
@@ -2281,9 +2280,7 @@ def GetBuilderMaster(bot_list):
   return result_master, None
 
 
-=======
 @subcommand.hidden
->>>>>>> git-cl workflow adjustments
 def CMDtree(parser, args):
   """Shows the status of the tree."""
   _, args = parser.parse_args(args)
