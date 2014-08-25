@@ -3,8 +3,24 @@ specific modifications.
 
 ninja.exe built with MSVC 2012
 from
-https://github.com/rjogrady/ninja/commit/1287257fe343c4b6b0f760308a7bec52d86b0edf
+https://github.com/rjogrady/ninja/commit/2feb1180afe21bbc6453dd7a95fe53c2e25fbb55
 
 ninja_linux64 built with gcc
 from
 https://github.com/rjogrady/ninja/commit/613d89893e56acc8c3670a66a33fcd2caf7d9050
+
+For Windows, we provide a simple_echo.exe for ninja to use when building with SN-DBS.
+Code is as follows:
+
+#include <stdio.h>
+int main(int argc, char** argv) {
+  int i;
+  for (i = 1; i < argc; ++i) {
+    if (i != 1) {
+      putc(' ', stdout);
+    }
+    fputs(argv[i], stdout);
+  }
+  putc('\n', stdout);
+}
+
