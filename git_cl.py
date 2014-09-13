@@ -1163,8 +1163,6 @@ def CMDconfig(parser, args):
   parser.add_option('--deactivate-update', action='store_true',
                     help='deactivate auto-updating [rietveld] section in '
                          '.git/config')
-  parser.add_option('--reload', action='store_true',
-                    help='reloads the configuration for this tree')
   options, args = parser.parse_args(args)
 
   if options.deactivate_update:
@@ -1175,23 +1173,18 @@ def CMDconfig(parser, args):
     RunGit(['config', '--unset', 'rietveld.autoupdate'])
     return
 
-  if len(args) == 0 and not options.reload:
+  if len(args) == 0:
     GetCodereviewSettingsInteractively()
     DownloadHooks(True)
     return 0
 
-  if options.reload:
-    cr_settings_file = FindCodereviewSettingsFile()
-  else:
-    url = args[0]
-    if not url.endswith('codereview.settings'):
-      url = os.path.join(url, 'codereview.settings')
-    cr_settings_file = urllib2.urlopen(url)
+  url = args[0]
+  if not url.endswith('codereview.settings'):
+    url = os.path.join(url, 'codereview.settings')
 
   # Load code review settings and download hooks (if available).
-  if cr_settings_file:
-    LoadCodereviewSettingsFromFile(cr_settings_file)
-    DownloadHooks(True)
+  LoadCodereviewSettingsFromFile(urllib2.urlopen(url))
+  DownloadHooks(True)
   return 0
 
 
