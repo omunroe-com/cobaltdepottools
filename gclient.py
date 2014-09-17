@@ -78,6 +78,7 @@
 
 __version__ = '0.7'
 
+import ast
 import copy
 import json
 import logging
@@ -102,6 +103,57 @@ from third_party.repo.progress import Progress
 import subcommand
 import subprocess2
 from third_party import colorama
+
+CHROMIUM_SRC_URL = 'https://chromium.googlesource.com/chromium/src.git'
+
+
+def ast_dict_index(dnode, key):
+  """Search an ast.Dict for the argument key, and return its index."""
+  idx = [i for i in range(len(dnode.keys)) if (
+      type(dnode.keys[i]) is ast.Str and dnode.keys[i].s == key)]
+  if not idx:
+    return -1
+  elif len(idx) > 1:
+    raise gclient_utils.Error('Multiple dict entries with same key in AST')
+  return idx[-1]
+
+def ast2str(node, indent=0):
+  """Return a pretty-printed rendition of an ast.Node."""
+  t = type(node)
+  if t is ast.Module:
+    return '\n'.join([ast2str(x, indent) for x in node.body])
+  elif t is ast.Assign:
+    return (('  ' * indent) +
+            ' = '.join([ast2str(x) for x in node.targets] +
+                       [ast2str(node.value, indent)]) + '\n')
+  elif t is ast.Name:
+    return node.id
+  elif t is ast.List:
+    if not node.elts:
+      return '[]'
+    elif len(node.elts) == 1:
+      return '[' + ast2str(node.elts[0], indent) + ']'
+    return ('[\n' + ('  ' * (indent + 1)) +
+            (',\n' + ('  ' * (indent + 1))).join(
+                [ast2str(x, indent + 1) for x in node.elts]) +
+            '\n' + ('  ' * indent) + ']')
+  elif t is ast.Dict:
+    if not node.keys:
+      return '{}'
+    elif len(node.keys) == 1:
+      return '{%s: %s}' % (ast2str(node.keys[0]),
+                           ast2str(node.values[0], indent + 1))
+    return ('{\n' + ('  ' * (indent + 1)) +
+            (',\n' + ('  ' * (indent + 1))).join(
+                ['%s: %s' % (ast2str(node.keys[i]),
+                             ast2str(node.values[i], indent + 1))
+                 for i in range(len(node.keys))]) +
+            '\n' + ('  ' * indent) + '}')
+  elif t is ast.Str:
+    return "'%s'" % node.s
+  else:
+    raise gclient_utils.Error("Unexpected AST node at line %d, column %d: %s"
+                              % (node.lineno, node.col_offset, t))
 
 
 class GClientKeywords(object):
@@ -1166,6 +1218,10 @@ want to set 'managed': False in .gclient.
     if cache_dir:
       cache_dir = os.path.join(self.root_dir, cache_dir)
       cache_dir = os.path.abspath(cache_dir)
+      # If running on a bot, force break any stale git cache locks.
+      if os.path.exists(cache_dir) and os.environ.get('CHROME_HEADLESS'):
+        subprocess2.check_call(['git', 'cache', 'unlock', '--cache-dir',
+                                cache_dir, '--force', '--all'])
     gclient_scm.GitWrapper.cache_dir = cache_dir
     git_cache.Mirror.SetCachePath(cache_dir)
 
@@ -1196,6 +1252,82 @@ want to set 'managed': False in .gclient.
                                          self._options.config_filename),
                             self.config_content)
 
+  def MigrateConfigToGit(self, path, options):
+    svn_url_re = re.compile('^(https?://src\.chromium\.org/svn|'
+                            'svn://svn\.chromium\.org/chrome)/'
+                            '(trunk|branches/[^/]+)/src')
+    old_git_re = re.compile('^(https?://git\.chromium\.org|'
+                            'ssh://([a-zA-Z_][a-zA-Z0-9_-]*@)?'
+                            'gerrit\.chromium\.org(:2941[89])?)/'
+                            'chromium/src\.git')
+    # Scan existing .gclient file for obsolete settings.  It would be simpler
+    # to traverse self.dependencies, but working with the AST allows the code to
+    # dump an updated .gclient file that preserves the ordering of the original.
+    a = ast.parse(self.config_content, options.config_filename, 'exec')
+    modified = False
+    solutions = [elem for elem in a.body if 'solutions' in
+                 [target.id for target in elem.targets]]
+    if not solutions:
+      return self
+    solutions = solutions[-1]
+    for solution in solutions.value.elts:
+      # Check for obsolete URL's
+      url_idx = ast_dict_index(solution, 'url')
+      if url_idx == -1:
+        continue
+      url_val = solution.values[url_idx]
+      if type(url_val) is not ast.Str:
+        continue
+      if (svn_url_re.match(url_val.s.strip())):
+        raise gclient_utils.Error(
+"""
+The chromium code repository has migrated completely to git.
+Your SVN-based checkout is now obsolete; you need to create a brand-new
+git checkout by following these instructions:
+
+http://www.chromium.org/developers/how-tos/get-the-code
+""")
+      if (old_git_re.match(url_val.s.strip())):
+        url_val.s = CHROMIUM_SRC_URL
+        modified = True
+
+      # Ensure deps_file is set to .DEPS.git.  We enforce this here to smooth
+      # over switching between pre-git-migration and post-git-migration
+      # revisions.
+      #   - For pre-migration revisions, .DEPS.git must be explicitly set.
+      #   - For post-migration revisions, .DEPS.git is not present, so gclient
+      #     will correctly fall back to DEPS.
+      if url_val.s == CHROMIUM_SRC_URL:
+        deps_file_idx = ast_dict_index(solution, 'deps_file')
+        if deps_file_idx != -1:
+          continue
+        solution.keys.append(ast.Str('deps_file'))
+        solution.values.append(ast.Str('.DEPS.git'))
+        modified = True
+
+    if not modified:
+      return self
+
+    print(
+"""
+WARNING: gclient detected an obsolete setting in your %s file.  The file has
+been automagically updated.  The previous version is available at %s.old.
+""" % (options.config_filename, options.config_filename))
+
+    # Replace existing .gclient with the updated version.
+    # Return a new GClient instance based on the new content.
+    new_content = ast2str(a)
+    dot_gclient_fn = os.path.join(path, options.config_filename)
+    try:
+      os.rename(dot_gclient_fn, dot_gclient_fn + '.old')
+    except OSError:
+      pass
+    with open(dot_gclient_fn, 'w') as fh:
+      fh.write(new_content)
+    client = GClient(path, options)
+    client.SetConfig(new_content)
+    return client
+
   @staticmethod
   def LoadCurrentConfig(options):
     """Searches for and loads a .gclient file relative to the current working
@@ -1210,6 +1342,7 @@ want to set 'managed': False in .gclient.
       client = GClient(path, options)
       client.SetConfig(gclient_utils.FileRead(
           os.path.join(path, options.config_filename)))
+      client = client.MigrateConfigToGit(path, options)
 
     if (options.revisions and
         len(client.dependencies) > 1 and
@@ -1324,12 +1457,11 @@ want to set 'managed': False in .gclient.
     if not self.dependencies:
       raise gclient_utils.Error('No solution specified')
 
-    self._CheckConfig()
-
     revision_overrides = {}
     # It's unnecessary to check for revision overrides for 'recurse'.
     # Save a few seconds by not calling _EnforceRevisions() in that case.
     if command not in ('diff', 'recurse', 'runhooks', 'status'):
+      self._CheckConfig()
       revision_overrides = self._EnforceRevisions()
     pm = None
     # Disable progress for non-tty stdout.
@@ -1647,8 +1779,6 @@ def CMDconfig(parser, args):
                          'to have the main solution untouched by gclient '
                          '(gclient will check out unmanaged dependencies but '
                          'will never sync them)')
-  parser.add_option('--git-deps', action='store_true',
-                    help='sets the deps file to ".DEPS.git" instead of "DEPS"')
   parser.add_option('--cache-dir',
                     help='(git only) Cache all git repos into this dir and do '
                          'shared clones from the cache, instead of cloning '
@@ -1674,8 +1804,6 @@ def CMDconfig(parser, args):
       # specify an alternate relpath for the given URL.
       name = options.name
     deps_file = options.deps_file
-    if options.git_deps:
-      deps_file = '.DEPS.git'
     safesync_url = ''
     if len(args) > 1:
       safesync_url = args[1]
