@@ -1595,16 +1595,15 @@ def GerritUpload(options, args, cl, change):
   remote = 'origin'
   branch = 'master'
 
-  if settings.GetIsGerritAutoDetectBranch() == 'true':
+  if options.target_branch:
+    remote = 'origin'
+    branch = options.target_branch
+  elif settings.GetIsGerritAutoDetectBranch() == 'true':
     retcode, result = RunGitWithCode(['rev-parse', '--abbrev-ref', '@{u}'])
     if retcode != 0:
       print('Unable to auto-detect remote branch.')
       return 1
     remote, branch = result.strip().split('/')
-
-  if options.target_branch:
-    remote = 'origin'
-    branch = options.target_branch
 
   change_desc = ChangeDescription(
       options.message or CreateDescriptionFromLog(args))
