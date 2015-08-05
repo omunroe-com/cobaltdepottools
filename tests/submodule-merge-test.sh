@@ -5,6 +5,8 @@
 # found in the LICENSE file.
 
 set -e
+SCRIPT_DIR=$(cd $(dirname "$BASH_SOURCE") && pwd)
+cd ${SCRIPT_DIR}
 
 . ./test-lib.sh
 
@@ -25,7 +27,7 @@ TBR=foo"
   git_diff=`git diff HEAD^ | sed -n '/^@@/,$p' | xargs`
 
   test_expect_success "dcommitted code" \
-      "$GIT_CL dcommit -f --bypass-hooks -m 'dcommit'"
+      "$GIT_CL dcommit --no-oauth2 -f --bypass-hooks -m 'dcommit'"
 
   cd ..
 
@@ -43,7 +45,7 @@ TBR=foo"
 
   cd git-svn-submodule
   git svn fetch
-  last_svn_rev=`git show refs/remotes/trunk | grep git-svn-id: | \
+  last_svn_rev=`git show refs/remotes/origin/trunk | grep git-svn-id: | \
       grep -o trunk@[0-9]* | xargs`
 
   test_expect_success "git svn fetch gets new svn revision" \

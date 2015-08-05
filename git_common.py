@@ -81,19 +81,21 @@ GIT_TRANSIENT_ERRORS = (
     # crbug.com/187444
     r'RPC failed; result=\d+, HTTP code = \d+',
 
-    # crbug.com/315421
-    r'The requested URL returned error: 500 while accessing',
-
     # crbug.com/388876
     r'Connection timed out',
+
+    # crbug.com/430343
+    # TODO(dnj): Resync with Chromite.
+    r'The requested URL returned error: 5\d+',
 )
 
 GIT_TRANSIENT_ERRORS_RE = re.compile('|'.join(GIT_TRANSIENT_ERRORS),
                                      re.IGNORECASE)
 
-# First version where the for-each-ref command's format string supported the
-# upstream:track token.
-MIN_UPSTREAM_TRACK_GIT_VERSION = (1, 9)
+# git's for-each-ref command first supported the upstream:track token in its
+# format string in version 1.9.0, but some usages were broken until 2.3.0.
+# See git commit b6160d95 for more information.
+MIN_UPSTREAM_TRACK_GIT_VERSION = (2, 3)
 
 class BadCommitRefException(Exception):
   def __init__(self, refs):
@@ -292,7 +294,7 @@ def branch_config_map(option):
 
 
 def branches(*args):
-  NO_BRANCH = ('* (no branch', '* (detached from ')
+  NO_BRANCH = ('* (no branch', '* (detached', '* (HEAD detached')
 
   key = 'depot-tools.branch-limit'
   limit = 20
@@ -317,15 +319,6 @@ def branches(*args):
     if line.startswith(NO_BRANCH):
       continue
     yield line.split()[-1]
-
-
-def run_with_retcode(*cmd, **kwargs):
-  """Run a command but only return the status code."""
-  try:
-    run(*cmd, **kwargs)
-    return 0
-  except subprocess2.CalledProcessError as cpe:
-    return cpe.returncode
 
 
 def config(option, default=None):
@@ -407,7 +400,7 @@ def get_or_create_merge_base(branch, parent=None):
   base = branch_config(branch, 'base')
   base_upstream = branch_config(branch, 'base-upstream')
   parent = parent or upstream(branch)
-  if not parent:
+  if parent is None or branch is None:
     return None
   actual_merge_base = run('merge-base', parent, branch)
 
@@ -506,7 +499,7 @@ def parse_commitrefs(*commitrefs):
     raise BadCommitRefException(commitrefs)
 
 
-RebaseRet = collections.namedtuple('RebaseRet', 'success message')
+RebaseRet = collections.namedtuple('RebaseRet', 'success stdout stderr')
 
 
 def rebase(parent, start, branch, abort=False):
@@ -530,11 +523,11 @@ def rebase(parent, start, branch, abort=False):
     if TEST_MODE:
       args.insert(0, '--committer-date-is-author-date')
     run('rebase', *args)
-    return RebaseRet(True, '')
+    return RebaseRet(True, '', '')
   except subprocess2.CalledProcessError as cpe:
     if abort:
-      run('rebase', '--abort')
-    return RebaseRet(False, cpe.stdout)
+      run_with_retcode('rebase', '--abort')  # ignore failure
+    return RebaseRet(False, cpe.stdout, cpe.stderr)
 
 
 def remove_merge_base(branch):
@@ -551,6 +544,15 @@ def run(*cmd, **kwargs):
   return run_with_stderr(*cmd, **kwargs)[0]
 
 
+def run_with_retcode(*cmd, **kwargs):
+  """Run a command but only return the status code."""
+  try:
+    run(*cmd, **kwargs)
+    return 0
+  except subprocess2.CalledProcessError as cpe:
+    return cpe.returncode
+
+
 def run_stream(*cmd, **kwargs):
   """Runs a git command. Returns stdout as a PIPE (file-like object).
 
@@ -562,6 +564,28 @@ def run_stream(*cmd, **kwargs):
   cmd = (GIT_EXE, '-c', 'color.ui=never') + cmd
   proc = subprocess2.Popen(cmd, **kwargs)
   return proc.stdout
+
+
+@contextlib.contextmanager
+def run_stream_with_retcode(*cmd, **kwargs):
+  """Runs a git command as context manager yielding stdout as a PIPE.
+
+  stderr is dropped to avoid races if the process outputs to both stdout and
+  stderr.
+
+  Raises subprocess2.CalledProcessError on nonzero return code.
+  """
+  kwargs.setdefault('stderr', subprocess2.VOID)
+  kwargs.setdefault('stdout', subprocess2.PIPE)
+  cmd = (GIT_EXE, '-c', 'color.ui=never') + cmd
+  try:
+    proc = subprocess2.Popen(cmd, **kwargs)
+    yield proc.stdout
+  finally:
+    retcode = proc.wait()
+    if retcode != 0:
+      raise subprocess2.CalledProcessError(retcode, cmd, os.getcwd(),
+                                           None, None)
 
 
 def run_with_stderr(*cmd, **kwargs):
@@ -600,6 +624,25 @@ def set_branch_config(branch, option, value, scope='local'):
 def set_config(option, value, scope='local'):
   run('config', '--' + scope, option, value)
 
+
+def get_dirty_files():
+  # Make sure index is up-to-date before running diff-index.
+  run_with_retcode('update-index', '--refresh', '-q')
+  return run('diff-index', '--name-status', 'HEAD')
+
+
+def is_dirty_git_tree(cmd):
+  dirty = get_dirty_files()
+  if dirty:
+    print 'Cannot %s with a dirty tree. You must commit locally first.' % cmd
+    print 'Uncommitted files: (git diff-index --name-status HEAD)'
+    print dirty[:4096]
+    if len(dirty) > 4096: # pragma: no cover
+      print '... (run "git diff-index --name-status HEAD" to see full output).'
+    return True
+  return False
+
+
 def squash_current_branch(header=None, merge_base=None):
   header = header or 'git squash commit.'
   merge_base = merge_base or get_or_create_merge_base(current_branch())
@@ -608,7 +651,14 @@ def squash_current_branch(header=None, merge_base=None):
     log_msg += '\n'
   log_msg += run('log', '--reverse', '--format=%H%n%B', '%s..HEAD' % merge_base)
   run('reset', '--soft', merge_base)
-  run('commit', '-a', '-F', '-', indata=log_msg)
+
+  if not get_dirty_files():
+    # Sometimes the squash can result in the same tree, meaning that there is
+    # nothing to commit at this point.
+    print 'Nothing to commit; squashed branch is empty'
+    return False
+  run('commit', '--no-verify', '-a', '-F', '-', indata=log_msg)
+  return True
 
 
 def tags(*args):
@@ -722,6 +772,7 @@ def upstream(branch):
                branch+'@{upstream}')
   except subprocess2.CalledProcessError:
     return None
+
 
 def get_git_version():
   """Returns a tuple that contains the numeric components of the current git

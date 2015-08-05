@@ -166,6 +166,13 @@ def safe_rename(old, new):
       time.sleep(0.1)
 
 
+def rm_file_or_tree(path):
+  if os.path.isfile(path):
+    os.remove(path)
+  else:
+    rmtree(path)
+
+
 def rmtree(path):
   """shutil.rmtree() on steroids.
 
@@ -655,15 +662,8 @@ def GetMacWinOrLinux():
   raise Error('Unknown platform: ' + sys.platform)
 
 
-def GetBuildtoolsPath():
-  """Returns the full path to the buildtools directory.
-  This is based on the root of the checkout containing the current directory."""
-
-  # Overriding the build tools path by environment is highly unsupported and may
-  # break without warning.  Do not rely on this for anything important.
-  override = os.environ.get('CHROMIUM_BUILDTOOLS_PATH')
-  if override is not None:
-    return override
+def GetPrimarySolutionPath():
+  """Returns the full path to the primary solution. (gclient_root + src)"""
 
   gclient_root = FindGclientRoot(os.getcwd())
   if not gclient_root:
@@ -679,18 +679,37 @@ def GetBuildtoolsPath():
       pass
     top_dir = top_dir[0]
     if os.path.exists(os.path.join(top_dir, 'buildtools')):
-      return os.path.join(top_dir, 'buildtools')
+      return top_dir
     return None
 
   # Some projects' top directory is not named 'src'.
   source_dir_name = GetGClientPrimarySolutionName(gclient_root) or 'src'
-  return os.path.join(gclient_root, source_dir_name, 'buildtools')
+  return os.path.join(gclient_root, source_dir_name)
+
+
+def GetBuildtoolsPath():
+  """Returns the full path to the buildtools directory.
+  This is based on the root of the checkout containing the current directory."""
+
+  # Overriding the build tools path by environment is highly unsupported and may
+  # break without warning.  Do not rely on this for anything important.
+  override = os.environ.get('CHROMIUM_BUILDTOOLS_PATH')
+  if override is not None:
+    return override
+
+  primary_solution = GetPrimarySolutionPath()
+  if not primary_solution:
+    return None
+  buildtools_path = os.path.join(primary_solution, 'buildtools')
+  if not os.path.exists(buildtools_path):
+    # Buildtools may be in the gclient root.
+    gclient_root = FindGclientRoot(os.getcwd())
+    buildtools_path = os.path.join(gclient_root, 'buildtools')
+  return buildtools_path
 
 
 def GetBuildtoolsPlatformBinaryPath():
   """Returns the full path to the binary directory for the current platform."""
-  # Mac and Windows just have one directory, Linux has two according to whether
-  # it's 32 or 64 bits.
   buildtools_path = GetBuildtoolsPath()
   if not buildtools_path:
     return None
@@ -700,10 +719,7 @@ def GetBuildtoolsPlatformBinaryPath():
   elif sys.platform == 'darwin':
     subdir = 'mac'
   elif sys.platform.startswith('linux'):
-    if sys.maxsize > 2**32:
       subdir = 'linux64'
-    else:
-      subdir = 'linux32'
   else:
     raise Error('Unknown platform: ' + sys.platform)
   return os.path.join(buildtools_path, subdir)
@@ -1130,15 +1146,33 @@ def ParseCodereviewSettingsContent(content):
 def NumLocalCpus():
   """Returns the number of processors.
 
-  Python on OSX 10.6 raises a NotImplementedError exception.
+  multiprocessing.cpu_count() is permitted to raise NotImplementedError, and
+  is known to do this on some Windows systems and OSX 10.6. If we can't get the
+  CPU count, we will fall back to '1'.
   """
+  # Surround the entire thing in try/except; no failure here should stop gclient
+  # from working.
   try:
-    import multiprocessing
-    return multiprocessing.cpu_count()
-  except:  # pylint: disable=W0702
-    # Mac OS 10.6 only
-    # pylint: disable=E1101
-    return int(os.sysconf('SC_NPROCESSORS_ONLN'))
+    # Use multiprocessing to get CPU count. This may raise
+    # NotImplementedError.
+    try:
+      import multiprocessing
+      return multiprocessing.cpu_count()
+    except NotImplementedError:  # pylint: disable=W0702
+      # (UNIX) Query 'os.sysconf'.
+      # pylint: disable=E1101
+      if hasattr(os, 'sysconf') and 'SC_NPROCESSORS_ONLN' in os.sysconf_names:
+        return int(os.sysconf('SC_NPROCESSORS_ONLN'))
+
+      # (Windows) Query 'NUMBER_OF_PROCESSORS' environment variable.
+      if 'NUMBER_OF_PROCESSORS' in os.environ:
+        return int(os.environ['NUMBER_OF_PROCESSORS'])
+  except Exception as e:
+    logging.exception("Exception raised while probing CPU count: %s", e)
+
+  logging.debug('Failed to get CPU count. Defaulting to 1.')
+  return 1
+
 
 def DefaultDeltaBaseCacheLimit():
   """Return a reasonable default for the git config core.deltaBaseCacheLimit.
@@ -1152,6 +1186,7 @@ def DefaultDeltaBaseCacheLimit():
   else:
     return '512m'
 
+
 def DefaultIndexPackConfig(url=''):
   """Return reasonable default values for configuring git-index-pack.
 
@@ -1162,3 +1197,21 @@ def DefaultIndexPackConfig(url=''):
   if url in THREADED_INDEX_PACK_BLACKLIST:
     result.extend(['-c', 'pack.threads=1'])
   return result
+
+
+def FindExecutable(executable):
+  """This mimics the "which" utility."""
+  path_folders = os.environ.get('PATH').split(os.pathsep)
+
+  for path_folder in path_folders:
+    target = os.path.join(path_folder, executable)
+    # Just incase we have some ~/blah paths.
+    target = os.path.abspath(os.path.expanduser(target))
+    if os.path.isfile(target) and os.access(target, os.X_OK):
+      return target
+    if sys.platform.startswith('win'):
+      for suffix in ('.bat', '.cmd', '.exe'):
+        alt_target = target + suffix
+        if os.path.isfile(alt_target) and os.access(alt_target, os.X_OK):
+          return alt_target
+  return None

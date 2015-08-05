@@ -12,28 +12,35 @@ import collections
 import logging
 import sys
 import textwrap
+import os
 
+from fnmatch import fnmatch
 from pprint import pformat
 
 import git_common as git
 
 
 STARTING_BRANCH_KEY = 'depot-tools.rebase-update.starting-branch'
+STARTING_WORKDIR_KEY = 'depot-tools.rebase-update.starting-workdir'
 
 
-def find_return_branch():
-  """Finds the branch which we should return to after rebase-update completes.
+def find_return_branch_workdir():
+  """Finds the branch and working directory which we should return to after
+  rebase-update completes.
 
-  This value may persist across multiple invocations of rebase-update, if
+  These values may persist across multiple invocations of rebase-update, if
   rebase-update runs into a conflict mid-way.
   """
   return_branch = git.config(STARTING_BRANCH_KEY)
+  workdir = git.config(STARTING_WORKDIR_KEY)
   if not return_branch:
+    workdir = os.getcwd()
+    git.set_config(STARTING_WORKDIR_KEY, workdir)
     return_branch = git.current_branch()
     if return_branch != 'HEAD':
       git.set_config(STARTING_BRANCH_KEY, return_branch)
 
-  return return_branch
+  return return_branch, workdir
 
 
 def fetch_remotes(branch_tree):
@@ -41,15 +48,23 @@ def fetch_remotes(branch_tree):
   fetch_tags = False
   remotes = set()
   tag_set = git.tags()
+  fetchspec_map = {}
+  all_fetchspec_configs = git.run(
+      'config', '--get-regexp', r'^remote\..*\.fetch').strip()
+  for fetchspec_config in all_fetchspec_configs.splitlines():
+    key, _, fetchspec = fetchspec_config.partition(' ')
+    dest_spec = fetchspec.partition(':')[2]
+    remote_name = key.split('.')[1]
+    fetchspec_map[dest_spec] = remote_name
   for parent in branch_tree.itervalues():
     if parent in tag_set:
       fetch_tags = True
     else:
       full_ref = git.run('rev-parse', '--symbolic-full-name', parent)
-      if full_ref.startswith('refs/remotes'):
-        parts = full_ref.split('/')
-        remote_name = parts[2]
-        remotes.add(remote_name)
+      for dest_spec, remote_name in fetchspec_map.iteritems():
+        if fnmatch(full_ref, dest_spec):
+          remotes.add(remote_name)
+          break
 
   fetch_args = []
   if fetch_tags:
@@ -121,7 +136,8 @@ def rebase_branch(branch, parent, start_hash):
   if git.hash_one(parent) != start_hash:
     # Try a plain rebase first
     print 'Rebasing:', branch
-    if not git.rebase(parent, start_hash, branch, abort=True).success:
+    rebase_ret = git.rebase(parent, start_hash, branch, abort=True)
+    if not rebase_ret.success:
       # TODO(iannucci): Find collapsible branches in a smarter way?
       print "Failed! Attempting to squash", branch, "...",
       squash_branch = branch+"_squash_attempt"
@@ -138,25 +154,36 @@ def rebase_branch(branch, parent, start_hash):
         git.squash_current_branch(merge_base=start_hash)
         git.rebase(parent, start_hash, branch)
       else:
-        # rebase and leave in mid-rebase state.
-        git.rebase(parent, start_hash, branch)
         print "Failed!"
         print
-        print "Here's what git-rebase had to say:"
-        print squash_ret.message
-        print
-        print textwrap.dedent(
-        """
-        Squashing failed. You probably have a real merge conflict.
 
-        Your working copy is in mid-rebase. Either:
-         * completely resolve like a normal git-rebase; OR
-         * abort the rebase and mark this branch as dormant:
-               git config branch.%s.dormant true
+        # rebase and leave in mid-rebase state.
+        # This second rebase attempt should always fail in the same
+        # way that the first one does.  If it magically succeeds then
+        # something very strange has happened.
+        second_rebase_ret = git.rebase(parent, start_hash, branch)
+        if second_rebase_ret.success: # pragma: no cover
+          print "Second rebase succeeded unexpectedly!"
+          print "Please see: http://crbug.com/425696"
+          print "First rebased failed with:"
+          print rebase_ret.stderr
+        else:
+          print "Here's what git-rebase (squashed) had to say:"
+          print
+          print squash_ret.stdout
+          print squash_ret.stderr
+          print textwrap.dedent(
+          """\
+          Squashing failed. You probably have a real merge conflict.
 
-        And then run `git rebase-update` again to resume.
-        """ % branch)
-        return False
+          Your working copy is in mid-rebase. Either:
+           * completely resolve like a normal git-rebase; OR
+           * abort the rebase and mark this branch as dormant:
+                 git config branch.%s.dormant true
+
+          And then run `git rebase-update` again to resume.
+          """ % branch)
+          return False
   else:
     print '%s up-to-date' % branch
 
@@ -166,7 +193,7 @@ def rebase_branch(branch, parent, start_hash):
   return True
 
 
-def main(args=()):
+def main(args=None):
   parser = argparse.ArgumentParser()
   parser.add_argument('--verbose', '-v', action='store_true')
   parser.add_argument('--no_fetch', '--no-fetch', '-n',
@@ -193,7 +220,8 @@ def main(args=()):
     )
     return 1
 
-  return_branch = find_return_branch()
+  return_branch, return_workdir = find_return_branch_workdir()
+  os.chdir(git.run('rev-parse', '--show-toplevel'))
 
   if git.current_branch() == 'HEAD':
     if git.run('status', '--porcelain'):
@@ -243,10 +271,17 @@ def main(args=()):
           % (return_branch, root_branch)
         )
       git.run('checkout', root_branch)
+    if return_workdir:
+      os.chdir(return_workdir)
     git.set_config(STARTING_BRANCH_KEY, '')
+    git.set_config(STARTING_WORKDIR_KEY, '')
 
   return retcode
 
 
 if __name__ == '__main__':  # pragma: no cover
-  sys.exit(main(sys.argv[1:]))
+  try:
+    sys.exit(main())
+  except KeyboardInterrupt:
+    sys.stderr.write('interrupted\n')
+    sys.exit(1)

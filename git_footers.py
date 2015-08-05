@@ -11,9 +11,11 @@ from collections import defaultdict
 
 import git_common as git
 
+
 FOOTER_PATTERN = re.compile(r'^\s*([\w-]+): (.*)$')
 CHROME_COMMIT_POSITION_PATTERN = re.compile(r'^([\w/-]+)@{#(\d+)}$')
 GIT_SVN_ID_PATTERN = re.compile('^([^\s@]+)@(\d+)')
+
 
 def normalize_name(header):
   return '-'.join([ word.title() for word in header.strip().split('-') ])
@@ -44,6 +46,20 @@ def parse_footers(message):
     footer_map[normalize_name(k)].append(v.strip())
 
   return footer_map
+
+
+def get_footer_svn_id(branch=None):
+  if not branch:
+    branch = git.root()
+  svn_id = None
+  message = git.run('log', '-1', '--format=%B', branch)
+  footers = parse_footers(message)
+  git_svn_id = get_unique(footers, 'git-svn-id')
+  if git_svn_id:
+    match = GIT_SVN_ID_PATTERN.match(git_svn_id)
+    if match:
+      svn_id = match.group(1)
+  return svn_id
 
 
 def get_unique(footers, key):
@@ -79,6 +95,14 @@ def get_position(footers):
   if svn_commit:
     match = GIT_SVN_ID_PATTERN.match(svn_commit)
     assert match, 'Invalid git-svn-id value: %s' % svn_commit
+    # V8 has different semantics than Chromium.
+    if re.match(r'.*https?://v8\.googlecode\.com/svn/trunk',
+                match.group(1)):
+      return ('refs/heads/candidates', match.group(2))
+    if re.match(r'.*https?://v8\.googlecode\.com/svn/branches/bleeding_edge',
+                match.group(1)):
+      return ('refs/heads/master', match.group(2))
+
     # Assume that any trunk svn revision will match the commit-position
     # semantics.
     if re.match('.*/trunk.*$', match.group(1)):
@@ -129,7 +153,12 @@ def main(args):
     for k in footers.keys():
       for v in footers[k]:
         print '%s: %s' % (k, v)
+  return 0
 
 
 if __name__ == '__main__':
-  sys.exit(main(sys.argv[1:]))
+  try:
+    sys.exit(main(sys.argv[1:]))
+  except KeyboardInterrupt:
+    sys.stderr.write('interrupted\n')
+    sys.exit(1)

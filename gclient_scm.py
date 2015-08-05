@@ -27,10 +27,9 @@ import subprocess2
 THIS_FILE_PATH = os.path.abspath(__file__)
 
 GSUTIL_DEFAULT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    'third_party', 'gsutil', 'gsutil')
+    os.path.dirname(os.path.abspath(__file__)), 'gsutil.py')
 
-CHROMIUM_SRC_URL = 'https://chromium.googlesource.com/chromium/src.git'
+
 class DiffFiltererWrapper(object):
   """Simple base class which tracks which file is being diffed and
   replaces instances of its file name in the original and
@@ -96,6 +95,10 @@ def GetScmName(url):
       return 'git'
     elif (url.startswith('http://') or url.startswith('https://') or
           url.startswith('svn://') or url.startswith('svn+ssh://')):
+      return 'svn'
+    elif url.startswith('file://'):
+      if url.endswith('.git'):
+        return 'git'
       return 'svn'
   return None
 
@@ -294,7 +297,7 @@ class GitWrapper(SCMWrapper):
     gclient_utils.CheckCallAndFilter(
         ['git', 'diff', merge_base],
         cwd=self.checkout_path,
-        filter_fn=GitDiffFilterer(self.relpath).Filter, print_func=self.Print)
+        filter_fn=GitDiffFilterer(self.relpath, print_func=self.Print).Filter)
 
   def _FetchAndReset(self, revision, file_list, options):
     """Equivalent to git fetch; git reset."""
@@ -315,10 +318,10 @@ class GitWrapper(SCMWrapper):
       return
     for f in os.listdir(hook_dir):
       if not f.endswith('.sample') and not f.endswith('.disabled'):
-        dest_name = os.path.join(hook_dir, f + '.disabled')
-        if os.path.exists(dest_name):
-          os.remove(dest_name)
-        os.rename(os.path.join(hook_dir, f), dest_name)
+        disabled_hook_path = os.path.join(hook_dir, f + '.disabled')
+        if os.path.exists(disabled_hook_path):
+          os.remove(disabled_hook_path)
+        os.rename(os.path.join(hook_dir, f), disabled_hook_path)
 
   def update(self, options, args, file_list):
     """Runs git to update or transparently checkout the working copy.
@@ -388,6 +391,20 @@ class GitWrapper(SCMWrapper):
     if mirror:
       url = mirror.mirror_path
 
+    # If we are going to introduce a new project, there is a possibility that
+    # we are syncing back to a state where the project was originally a
+    # sub-project rolled by DEPS (realistic case: crossing the Blink merge point
+    # syncing backwards, when Blink was a DEPS entry and not part of src.git).
+    # In such case, we might have a backup of the former .git folder, which can
+    # be used to avoid re-fetching the entire repo again (useful for bisects).
+    backup_dir = self.GetGitBackupDirPath()
+    target_dir = os.path.join(self.checkout_path, '.git')
+    if os.path.exists(backup_dir) and not os.path.exists(target_dir):
+      gclient_utils.safe_makedirs(self.checkout_path)
+      os.rename(backup_dir, target_dir)
+      # Reset to a clean state
+      self._Run(['reset', '--hard', 'HEAD'], options)
+
     if (not os.path.exists(self.checkout_path) or
         (os.path.isdir(self.checkout_path) and
          not os.path.exists(os.path.join(self.checkout_path, '.git')))):
@@ -435,6 +452,11 @@ class GitWrapper(SCMWrapper):
         self._CheckClean(rev_str)
       # Switch over to the new upstream
       self._Run(['remote', 'set-url', self.remote, url], options)
+      if mirror:
+        with open(os.path.join(
+            self.checkout_path, '.git', 'objects', 'info', 'alternates'),
+            'w') as fh:
+          fh.write(os.path.join(url, 'objects'))
       self._FetchAndReset(revision, file_list, options)
       return_early = True
 
@@ -591,15 +613,16 @@ class GitWrapper(SCMWrapper):
             self.Print('_____ %s%s' % (self.relpath, rev_str), timestamp=False)
             printed_path = True
           while True:
-            try:
-              action = self._AskForData(
-                  'Cannot %s, attempt to rebase? '
-                  '(y)es / (q)uit / (s)kip : ' %
-                      ('merge' if options.merge else 'fast-forward merge'),
-                  options)
-            except ValueError:
-              raise gclient_utils.Error('Invalid Character')
-            if re.match(r'yes|y', action, re.I):
+            if not options.auto_rebase:
+              try:
+                action = self._AskForData(
+                    'Cannot %s, attempt to rebase? '
+                    '(y)es / (q)uit / (s)kip : ' %
+                        ('merge' if options.merge else 'fast-forward merge'),
+                    options)
+              except ValueError:
+                raise gclient_utils.Error('Invalid Character')
+            if options.auto_rebase or re.match(r'yes|y', action, re.I):
               self._AttemptRebase(upstream_branch, files, options,
                                   printed_path=printed_path, merge=False)
               printed_path = True
@@ -798,6 +821,12 @@ class GitWrapper(SCMWrapper):
     base_url = self.url
     return base_url[:base_url.rfind('/')] + url
 
+  def GetGitBackupDirPath(self):
+    """Returns the path where the .git folder for the current project can be
+    staged/restored. Use case: subproject moved from DEPS <-> outer project."""
+    return os.path.join(self._root_dir,
+                        'old_' + self.relpath.replace(os.sep, '_')) + '.git'
+
   def _GetMirror(self, url, options):
     """Get a git_cache.Mirror object for the argument url."""
     if not git_cache.Mirror.GetCachePath():
@@ -806,12 +835,6 @@ class GitWrapper(SCMWrapper):
         'print_func': self.filter,
         'refs': []
     }
-    # TODO(hinoka): This currently just fails because lkcr/lkgr are branches
-    #               not tags. This also adds 20 seconds to every bot_update
-    #               run, so I'm commenting this out until lkcr/lkgr become
-    #               tags.  (2014/4/24)
-    # if url == CHROMIUM_SRC_URL or url + '.git' == CHROMIUM_SRC_URL:
-    #  mirror_kwargs['refs'].extend(['refs/tags/lkgr', 'refs/tags/lkcr'])
     if hasattr(options, 'with_branch_heads') and options.with_branch_heads:
       mirror_kwargs['refs'].append('refs/branch-heads/*')
     if hasattr(options, 'with_tags') and options.with_tags:
@@ -829,7 +852,9 @@ class GitWrapper(SCMWrapper):
         depth = 10000
     else:
       depth = None
-    mirror.populate(verbose=options.verbose, bootstrap=True, depth=depth,
+    mirror.populate(verbose=options.verbose,
+                    bootstrap=not getattr(options, 'no_bootstrap', False),
+                    depth=depth,
                     ignore_lock=getattr(options, 'ignore_locks', False))
     mirror.unlock()
 
@@ -1127,21 +1152,37 @@ class GitWrapper(SCMWrapper):
 
   def _Run(self, args, options, show_header=True, **kwargs):
     # Disable 'unused options' warning | pylint: disable=W0613
-    cwd = kwargs.setdefault('cwd', self.checkout_path)
+    kwargs.setdefault('cwd', self.checkout_path)
     kwargs.setdefault('stdout', self.out_fh)
     kwargs['filter_fn'] = self.filter
     kwargs.setdefault('print_stdout', False)
     env = scm.GIT.ApplyEnvVars(kwargs)
     cmd = ['git'] + args
     if show_header:
-      header = "running '%s' in '%s'" % (' '.join(cmd), cwd)
-      self.filter(header)
-    return gclient_utils.CheckCallAndFilter(cmd, env=env, **kwargs)
+      gclient_utils.CheckCallAndFilterAndHeader(cmd, env=env, **kwargs)
+    else:
+      gclient_utils.CheckCallAndFilter(cmd, env=env, **kwargs)
 
 
 class SVNWrapper(SCMWrapper):
   """ Wrapper for SVN """
   name = 'svn'
+  _PRINTED_DEPRECATION = False
+
+  _MESSAGE = (
+    'Oh hai! You are using subversion. Chrome infra is eager to get rid of',
+    'svn support so please switch to git.',
+    'Tracking bug: http://crbug.com/475320',
+    'If you are a project owner, you may request git migration assistance at: ',
+    '  https://code.google.com/p/chromium/issues/entry?template=Infra-Git')
+
+  def __init__(self, *args, **kwargs):
+    super(SVNWrapper, self).__init__(*args, **kwargs)
+    suppress_deprecated_notice = os.environ.get(
+        'SUPPRESS_DEPRECATED_SVN_NOTICE', False)
+    if not SVNWrapper._PRINTED_DEPRECATION and not suppress_deprecated_notice:
+      SVNWrapper._PRINTED_DEPRECATION = True
+      sys.stderr.write('\n'.join(self._MESSAGE) + '\n')
 
   @staticmethod
   def BinaryExists():
@@ -1186,7 +1227,7 @@ class SVNWrapper(SCMWrapper):
         ['svn', 'diff', '-x', '--ignore-eol-style'] + args,
         cwd=self.checkout_path,
         print_stdout=False,
-        filter_fn=SvnDiffFilterer(self.relpath).Filter, print_func=self.Print)
+        filter_fn=SvnDiffFilterer(self.relpath, print_func=self.Print).Filter)
 
   def update(self, options, args, file_list):
     """Runs svn to update or transparently checkout the working copy.

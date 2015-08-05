@@ -142,8 +142,7 @@ class Mirror(object):
 
   git_exe = 'git.bat' if sys.platform.startswith('win') else 'git'
   gsutil_exe = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    'third_party', 'gsutil', 'gsutil')
+    os.path.dirname(os.path.abspath(__file__)), 'gsutil.py')
   cachepath_lock = threading.Lock()
 
   def __init__(self, url, refs=None, print_func=None):
@@ -151,7 +150,14 @@ class Mirror(object):
     self.refs = refs or []
     self.basedir = self.UrlToCacheDir(url)
     self.mirror_path = os.path.join(self.GetCachePath(), self.basedir)
-    self.print = print_func or print
+    if print_func:
+      self.print = self.print_without_file
+      self.print_func = print_func
+    else:
+      self.print = print
+
+  def print_without_file(self, message, **kwargs):
+    self.print_func(message)
 
   @property
   def bootstrap_bucket(self):
@@ -178,24 +184,6 @@ class Mirror(object):
     """Convert a cache dir path to its corresponding url."""
     netpath = re.sub(r'\b-\b', '/', os.path.basename(path)).replace('--', '-')
     return 'https://%s' % netpath
-
-  @staticmethod
-  def FindExecutable(executable):
-    """This mimics the "which" utility."""
-    path_folders = os.environ.get('PATH').split(os.pathsep)
-
-    for path_folder in path_folders:
-      target = os.path.join(path_folder, executable)
-      # Just incase we have some ~/blah paths.
-      target = os.path.abspath(os.path.expanduser(target))
-      if os.path.isfile(target) and os.access(target, os.X_OK):
-        return target
-      if sys.platform.startswith('win'):
-        for suffix in ('.bat', '.cmd', '.exe'):
-          alt_target = target + suffix
-          if os.path.isfile(alt_target) and os.access(alt_target, os.X_OK):
-            return alt_target
-    return None
 
   @classmethod
   def SetCachePath(cls, cachepath):
@@ -267,16 +255,17 @@ class Mirror(object):
     """
 
     python_fallback = False
-    if sys.platform.startswith('win') and not self.FindExecutable('7z'):
+    if (sys.platform.startswith('win') and
+        not gclient_utils.FindExecutable('7z')):
       python_fallback = True
     elif sys.platform.startswith('darwin'):
       # The OSX version of unzip doesn't support zip64.
       python_fallback = True
-    elif not self.FindExecutable('unzip'):
+    elif not gclient_utils.FindExecutable('unzip'):
       python_fallback = True
 
     gs_folder = 'gs://%s/%s' % (self.bootstrap_bucket, self.basedir)
-    gsutil = Gsutil(self.gsutil_exe, boto_path=None, bypass_prodaccess=True)
+    gsutil = Gsutil(self.gsutil_exe, boto_path=None)
     # Get the most recent version of the zipfile.
     _, ls_out, _ = gsutil.check_call('ls', gs_folder)
     ls_out_sorted = sorted(ls_out.splitlines())
@@ -313,7 +302,7 @@ class Mirror(object):
           retcode = 0
     finally:
       # Clean up the downloaded zipfile.
-      gclient_utils.rmtree(tempdir)
+      gclient_utils.rm_file_or_tree(tempdir)
 
     if retcode:
       self.print(
@@ -487,7 +476,7 @@ class Mirror(object):
                      if os.path.isdir(os.path.join(cachepath, path))])
     for dirent in dirlist:
       if dirent.startswith('_cache_tmp') or dirent.startswith('tmp'):
-        gclient_utils.rmtree(os.path.join(cachepath, dirent))
+        gclient_utils.rm_file_or_tree(os.path.join(cachepath, dirent))
       elif (dirent.endswith('.lock') and
           os.path.isfile(os.path.join(cachepath, dirent))):
         repo_dirs.add(os.path.join(cachepath, dirent[:-5]))
@@ -691,4 +680,8 @@ def main(argv):
 
 
 if __name__ == '__main__':
-  sys.exit(main(sys.argv[1:]))
+  try:
+    sys.exit(main(sys.argv[1:]))
+  except KeyboardInterrupt:
+    sys.stderr.write('interrupted\n')
+    sys.exit(1)

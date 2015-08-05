@@ -221,6 +221,24 @@ class GitReadOnlyFunctionsTest(git_test_utils.GitRepoReadOnlyTestBase,
 
     self.repo.run(testfn)
 
+  def testStreamWithRetcode(self):
+    items = set(self.repo.commit_map.itervalues())
+
+    def testfn():
+      with self.gc.run_stream_with_retcode('log', '--format=%H') as stdout:
+        for line in stdout.xreadlines():
+          line = line.strip()
+          self.assertIn(line, items)
+          items.remove(line)
+
+    self.repo.run(testfn)
+
+  def testStreamWithRetcodeException(self):
+    import subprocess2
+    with self.assertRaises(subprocess2.CalledProcessError):
+      with self.gc.run_stream_with_retcode('checkout', 'unknown-branch'):
+        pass
+
   def testCurrentBranch(self):
     def cur_branch_out_of_git():
       os.chdir('..')
@@ -231,6 +249,7 @@ class GitReadOnlyFunctionsTest(git_test_utils.GitRepoReadOnlyTestBase,
     self.assertEqual(self.repo.run(self.gc.current_branch), 'branch_D')
 
   def testBranches(self):
+    # This check fails with git 2.4 (see crbug.com/487172)
     self.assertEqual(self.repo.run(set, self.gc.branches()),
                      {'master', 'branch_D', 'root_A'})
 
@@ -410,7 +429,7 @@ class GitMutableFunctionsTest(git_test_utils.GitRepoReadWriteTestBase,
         'parent_gone': (
             self.repo.run(self.gc.hash_one, 'parent_gone', short=True),
             'to_delete',
-            1 if supports_track else None,
+            None,
             None
         ),
         'to_delete': None
@@ -460,6 +479,7 @@ class GitMutableStructuredTest(git_test_utils.GitRepoReadWriteTestBase,
     self.repo.git('config', 'depot-tools.branch-limit', '100')
 
     # should not raise
+    # This check fails with git 2.4 (see crbug.com/487172)
     self.assertEqual(38, len(self.repo.run(list, self.gc.branches())))
 
   def testMergeBase(self):
@@ -532,6 +552,7 @@ class GitMutableStructuredTest(git_test_utils.GitRepoReadWriteTestBase,
 
   def testGetBranchTree(self):
     skipped, tree = self.repo.run(self.gc.get_branch_tree)
+    # This check fails with git 2.4 (see crbug.com/487172)
     self.assertEqual(skipped, {'master', 'root_X', 'branch_DOG', 'root_CAT'})
     self.assertEqual(tree, {
       'branch_G': 'root_A',
@@ -560,10 +581,17 @@ class GitMutableStructuredTest(git_test_utils.GitRepoReadWriteTestBase,
       ('root_A', 'root_X'),
     ])
 
+  def testIsGitTreeDirty(self):
+    self.assertEquals(False, self.repo.run(self.gc.is_dirty_git_tree, 'foo'))
+    self.repo.open('test.file', 'w').write('test data')
+    self.repo.git('add', 'test.file')
+    self.assertEquals(True, self.repo.run(self.gc.is_dirty_git_tree, 'foo'))
+
   def testSquashBranch(self):
     self.repo.git('checkout', 'branch_K')
 
-    self.repo.run(self.gc.squash_current_branch, 'cool message')
+    self.assertEquals(True, self.repo.run(self.gc.squash_current_branch,
+                                          'cool message'))
 
     lines = ['cool message', '']
     for l in 'HIJK':
@@ -578,6 +606,14 @@ class GitMutableStructuredTest(git_test_utils.GitRepoReadWriteTestBase,
       self.repo.git('cat-file', 'blob', 'branch_K:file').stdout,
       'K'
     )
+
+  def testSquashBranchEmpty(self):
+    self.repo.git('checkout', 'branch_K')
+    self.repo.git('checkout', 'branch_G', '.')
+    self.repo.git('commit', '-m', 'revert all changes no branch')
+    # Should return False since the quash would result in an empty commit
+    stdout = self.repo.capture_stdio(self.gc.squash_current_branch)[0]
+    self.assertEquals(stdout, 'Nothing to commit; squashed branch is empty\n')
 
   def testRebase(self):
     self.assertSchema("""
@@ -709,5 +745,4 @@ class GitFreezeThaw(git_test_utils.GitRepoReadWriteTestBase):
 
 if __name__ == '__main__':
   sys.exit(coverage_utils.covered_main(
-    os.path.join(DEPOT_TOOLS_ROOT, 'git_common.py')
-  ))
+    os.path.join(DEPOT_TOOLS_ROOT, 'git_common.py')))

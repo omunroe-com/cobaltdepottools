@@ -203,6 +203,7 @@ class GitRebaseUpdateTest(git_test_utils.GitRepoReadWriteTestBase):
 
     self.repo.run(self.mv.main, ['special_K', 'cool_branch'])
     branches = self.repo.run(set, self.gc.branches())
+    # This check fails with git 2.4 (see crbug.com/487172)
     self.assertEqual(branches, {'cool_branch', 'master', 'sub_K', 'root_A',
                                 'branch_L', 'old_branch', 'foobar'})
 

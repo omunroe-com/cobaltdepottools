@@ -34,7 +34,6 @@ against by using the '--rev' option.
 # This code is derived from appcfg.py in the App Engine SDK (open source),
 # and from ASPN recipe #146306.
 
-import BaseHTTPServer
 import ConfigParser
 import cookielib
 import errno
@@ -52,7 +51,6 @@ import sys
 import urllib
 import urllib2
 import urlparse
-import webbrowser
 
 from multiprocessing.pool import ThreadPool
 
@@ -69,8 +67,12 @@ except ImportError:
 
 try:
   import keyring
-except ImportError:
+except:
   keyring = None
+
+# auth.py is a part of depot_tools.
+# TODO(vadimsh): Merge upload.py into depot_tools
+import auth
 
 # The logging verbosity:
 #  0: Errors only.
@@ -102,22 +104,18 @@ VCS_CVS = "CVS"
 VCS_UNKNOWN = "Unknown"
 
 VCS = [
-{
-    'name': VCS_MERCURIAL,
-    'aliases': ['hg', 'mercurial'],
-}, {
-    'name': VCS_SUBVERSION,
-    'aliases': ['svn', 'subversion'],
-}, {
-    'name': VCS_PERFORCE,
-    'aliases': ['p4', 'perforce'],
-}, {
-    'name': VCS_GIT,
-    'aliases': ['git'],
-}, {
-    'name': VCS_CVS,
-    'aliases': ['cvs'],
-}]
+  {'name': VCS_MERCURIAL,
+   'aliases': ['hg', 'mercurial']},
+  {'name': VCS_SUBVERSION,
+   'aliases': ['svn', 'subversion'],},
+  {'name': VCS_PERFORCE,
+   'aliases': ['p4', 'perforce']},
+  {'name': VCS_GIT,
+   'aliases': ['git']},
+  {'name': VCS_CVS,
+   'aliases': ['cvs']},
+  ]
+
 
 VCS_SHORT_NAMES = []    # hg, svn, ...
 VCS_ABBREVIATIONS = {}  # alias: name, ...
@@ -125,48 +123,6 @@ for vcs in VCS:
   VCS_SHORT_NAMES.append(min(vcs['aliases'], key=len))
   VCS_ABBREVIATIONS.update((alias, vcs['name']) for alias in vcs['aliases'])
 
-
-# OAuth 2.0-Related Constants
-LOCALHOST_IP = '127.0.0.1'
-DEFAULT_OAUTH2_PORT = 8001
-ACCESS_TOKEN_PARAM = 'access_token'
-ERROR_PARAM = 'error'
-OAUTH_DEFAULT_ERROR_MESSAGE = 'OAuth 2.0 error occurred.'
-OAUTH_PATH = '/get-access-token'
-OAUTH_PATH_PORT_TEMPLATE = OAUTH_PATH + '?port=%(port)d'
-AUTH_HANDLER_RESPONSE = """\
-<html>
-  <head>
-    <title>Authentication Status</title>
-    <script>
-    window.onload = function() {
-      window.close();
-    }
-    </script>
-  </head>
-  <body>
-    <p>The authentication flow has completed.</p>
-  </body>
-</html>
-"""
-# Borrowed from google-api-python-client
-OPEN_LOCAL_MESSAGE_TEMPLATE = """\
-Your browser has been opened to visit:
-
-    %s
-
-If your browser is on a different machine then exit and re-run
-upload.py with the command-line parameter
-
-  --no_oauth2_webbrowser
-"""
-NO_OPEN_LOCAL_MESSAGE_TEMPLATE = """\
-Go to the following link in your browser:
-
-    %s
-
-and copy the access token.
-"""
 
 # The result of parsing Subversion's [auto-props] setting.
 svn_auto_props_map = None
@@ -217,7 +173,7 @@ def StatusUpdate(msg):
 
 def ErrorExit(msg):
   """Print an error message to stderr and exit."""
-  print >>sys.stderr, msg
+  print >> sys.stderr, msg
   sys.exit(1)
 
 
@@ -242,8 +198,8 @@ class AbstractRpcServer(object):
   """Provides a common interface for a simple RPC server."""
 
   def __init__(self, host, auth_function, host_override=None,
-               extra_headers=None, save_cookies=False,
-               account_type=AUTH_ACCOUNT_TYPE):
+               request_path_prefix=None, extra_headers=None,
+               save_cookies=False, account_type=AUTH_ACCOUNT_TYPE):
     """Creates a new AbstractRpcServer.
 
     Args:
@@ -252,6 +208,7 @@ class AbstractRpcServer(object):
         (email, password) tuple when called. Will be called if authentication
         is required.
       host_override: The host header to send to the server (defaults to host).
+      request_path_prefix: A string to prefix all URL paths with (e.g. 'bots/').
       extra_headers: A dict of extra headers to append to every request.
       save_cookies: If True, save the authentication cookies to local disk.
         If False, use an in-memory cookiejar instead.  Subclasses must
@@ -264,6 +221,7 @@ class AbstractRpcServer(object):
         not self.host.startswith("https://")):
       self.host = "http://" + self.host
     self.host_override = host_override
+    self.request_path_prefix = request_path_prefix or ''
     self.auth_function = auth_function
     self.authenticated = False
     self.extra_headers = extra_headers or {}
@@ -293,7 +251,7 @@ class AbstractRpcServer(object):
       req.add_header(key, value)
     return req
 
-  def _GetAuthToken(self, email, password):
+  def _GetAuthToken(self, email, password, internal=False):
     """Uses ClientLogin to authenticate the user, returning an auth token.
 
     Args:
@@ -311,8 +269,9 @@ class AbstractRpcServer(object):
     if self.host.endswith(".google.com"):
       # Needed for use inside Google.
       account_type = "HOSTED"
+    service = ('ClientLogin') if not internal else ('ClientAuth')
     req = self._CreateRequest(
-        url="https://www.google.com/accounts/ClientLogin",
+        url="https://www.google.com/accounts/%s" % (service,),
         data=urllib.urlencode({
             "Email": email,
             "Passwd": password,
@@ -360,7 +319,7 @@ class AbstractRpcServer(object):
                               response.headers, response.fp)
     self.authenticated = True
 
-  def _Authenticate(self):
+  def _Authenticate(self, force_refresh):
     """Authenticates the user.
 
     The authentication process works as follows:
@@ -377,44 +336,66 @@ class AbstractRpcServer(object):
     """
     for i in range(3):
       credentials = self.auth_function()
+
+      # Try external, then internal.
+      e = None
+      error_map = None
       try:
         auth_token = self._GetAuthToken(credentials[0], credentials[1])
-      except ClientLoginError, e:
-        print >>sys.stderr, ''
-        if e.reason == "BadAuthentication":
+      except urllib2.HTTPError:
+        try:
+          # Try internal endpoint.
+          error_map = {
+              "badauth": "BadAuthentication",
+              "cr": "CaptchaRequired",
+              "adel": "AccountDeleted",
+              "adis": "AccountDisabled",
+              "sdis": "ServiceDisabled",
+              "ire": "ServiceUnavailable",
+          }
+          auth_token = self._GetAuthToken(credentials[0], credentials[1],
+                                          internal=True)
+        except ClientLoginError, exc:
+          e = exc
+      if e:
+        print >> sys.stderr, ''
+        error_message = e.reason
+        if error_map:
+          error_message = error_map.get(error_message, error_message)
+        if error_message == "BadAuthentication":
           if e.info == "InvalidSecondFactor":
-            print >>sys.stderr, (
+            print >> sys.stderr, (
                 "Use an application-specific password instead "
                 "of your regular account password.\n"
                 "See http://www.google.com/"
                 "support/accounts/bin/answer.py?answer=185833")
           else:
-            print >>sys.stderr, "Invalid username or password."
-        elif e.reason == "CaptchaRequired":
-          print >>sys.stderr, (
+            print >> sys.stderr, "Invalid username or password."
+        elif error_message == "CaptchaRequired":
+          print >> sys.stderr, (
               "Please go to\n"
               "https://www.google.com/accounts/DisplayUnlockCaptcha\n"
               "and verify you are a human.  Then try again.\n"
               "If you are using a Google Apps account the URL is:\n"
               "https://www.google.com/a/yourdomain.com/UnlockCaptcha")
-        elif e.reason == "NotVerified":
-          print >>sys.stderr, "Account not verified."
-        elif e.reason == "TermsNotAgreed":
-          print >>sys.stderr, "User has not agreed to TOS."
-        elif e.reason == "AccountDeleted":
-          print >>sys.stderr, "The user account has been deleted."
-        elif e.reason == "AccountDisabled":
-          print >>sys.stderr, "The user account has been disabled."
+        elif error_message == "NotVerified":
+          print >> sys.stderr, "Account not verified."
+        elif error_message == "TermsNotAgreed":
+          print >> sys.stderr, "User has not agreed to TOS."
+        elif error_message == "AccountDeleted":
+          print >> sys.stderr, "The user account has been deleted."
+        elif error_message == "AccountDisabled":
+          print >> sys.stderr, "The user account has been disabled."
           break
-        elif e.reason == "ServiceDisabled":
-          print >>sys.stderr, ("The user's access to the service has been "
+        elif error_message == "ServiceDisabled":
+          print >> sys.stderr, ("The user's access to the service has been "
                                "disabled.")
-        elif e.reason == "ServiceUnavailable":
-          print >>sys.stderr, "The service is not available; try again later."
+        elif error_message == "ServiceUnavailable":
+          print >> sys.stderr, "The service is not available; try again later."
         else:
           # Unknown error.
-          raise
-        print >>sys.stderr, ''
+          raise e
+        print >> sys.stderr, ''
         continue
       self._GetAuthCookie(auth_token)
       return
@@ -443,16 +424,17 @@ class AbstractRpcServer(object):
     # TODO: Don't require authentication.  Let the server say
     # whether it is necessary.
     if not self.authenticated and self.auth_function:
-      self._Authenticate()
+      self._Authenticate(force_refresh=False)
 
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(timeout)
+    auth_attempted = False
     try:
       tries = 0
       while True:
         tries += 1
         args = dict(kwargs)
-        url = "%s%s" % (self.host, request_path)
+        url = "%s%s%s" % (self.host, self.request_path_prefix, request_path)
         if args:
           url += "?" + urllib.urlencode(args)
         req = self._CreateRequest(url=url, data=payload)
@@ -461,17 +443,23 @@ class AbstractRpcServer(object):
           for header, value in extra_headers.items():
             req.add_header(header, value)
         try:
-          f = self.opener.open(req)
+          f = self.opener.open(req, timeout=70)
           response = f.read()
           f.close()
           return response
         except urllib2.HTTPError, e:
           if tries > 3:
             raise
-          elif e.code == 401 or e.code == 302:
+          elif e.code in (302, 401, 403):
             if not self.auth_function:
               raise
-            self._Authenticate()
+            # Already tried force refresh, didn't help -> give up with error.
+            if auth_attempted:
+              raise auth.AuthenticationError(
+                  'Access to %s is denied (server returned HTTP %d).'
+                  % (self.host, e.code))
+            self._Authenticate(force_refresh=True)
+            auth_attempted = True
           elif e.code == 301:
             # Handle permanent redirect manually.
             url = e.info()["location"]
@@ -490,15 +478,22 @@ class AbstractRpcServer(object):
 class HttpRpcServer(AbstractRpcServer):
   """Provides a simplified RPC-style interface for HTTP requests."""
 
-  def _Authenticate(self):
+  def _Authenticate(self, force_refresh):
     """Save the cookie jar after authentication."""
-    if isinstance(self.auth_function, OAuth2Creds):
-      access_token = self.auth_function()
-      if access_token is not None:
-        self.extra_headers['Authorization'] = 'OAuth %s' % (access_token,)
-        self.authenticated = True
+    if isinstance(self.auth_function, auth.Authenticator):
+      try:
+        access_token = self.auth_function.get_access_token(force_refresh)
+      except auth.LoginRequiredError:
+        # Attempt to make unauthenticated request first if there's no cached
+        # credentials. HttpRpcServer calls __Authenticate(force_refresh=True)
+        # again if unauthenticated request doesn't work.
+        if not force_refresh:
+          return
+        raise
+      self.extra_headers['Authorization'] = 'Bearer %s' % (
+          access_token.token,)
     else:
-      super(HttpRpcServer, self)._Authenticate()
+      super(HttpRpcServer, self)._Authenticate(force_refresh)
       if self.save_cookies:
         StatusUpdate("Saving authentication cookies to %s" % self.cookie_file)
         self.cookie_jar.save()
@@ -542,37 +537,37 @@ class HttpRpcServer(AbstractRpcServer):
 
 
 class CondensedHelpFormatter(optparse.IndentedHelpFormatter):
-   """Frees more horizontal space by removing indentation from group
-      options and collapsing arguments between short and long, e.g.
-      '-o ARG, --opt=ARG' to -o --opt ARG"""
+  """Frees more horizontal space by removing indentation from group
+     options and collapsing arguments between short and long, e.g.
+     '-o ARG, --opt=ARG' to -o --opt ARG"""
 
-   def format_heading(self, heading):
-     return "%s:\n" % heading
+  def format_heading(self, heading):
+    return "%s:\n" % heading
 
-   def format_option(self, option):
-     self.dedent()
-     res = optparse.HelpFormatter.format_option(self, option)
-     self.indent()
-     return res
+  def format_option(self, option):
+    self.dedent()
+    res = optparse.HelpFormatter.format_option(self, option)
+    self.indent()
+    return res
 
-   def format_option_strings(self, option):
-     self.set_long_opt_delimiter(" ")
-     optstr = optparse.HelpFormatter.format_option_strings(self, option)
-     optlist = optstr.split(", ")
-     if len(optlist) > 1:
-       if option.takes_value():
-         # strip METAVAR from all but the last option
-         optlist = [x.split()[0] for x in optlist[:-1]] + optlist[-1:]
-       optstr = " ".join(optlist)
-     return optstr
+  def format_option_strings(self, option):
+    self.set_long_opt_delimiter(" ")
+    optstr = optparse.HelpFormatter.format_option_strings(self, option)
+    optlist = optstr.split(", ")
+    if len(optlist) > 1:
+      if option.takes_value():
+        # strip METAVAR from all but the last option
+        optlist = [x.split()[0] for x in optlist[:-1]] + optlist[-1:]
+      optstr = " ".join(optlist)
+    return optstr
 
 
 parser = optparse.OptionParser(
-    usage=("%prog [options] [-- diff_options] [path...]\n"
-           "See also: http://code.google.com/p/rietveld/wiki/UploadPyUsage"),
-    add_help_option=False,
-    formatter=CondensedHelpFormatter()
-)
+  usage=("%prog [options] [-- diff_options] [path...]\n"
+         "See also: http://code.google.com/p/rietveld/wiki/UploadPyUsage"),
+  add_help_option=False,
+  formatter=CondensedHelpFormatter()
+  )
 parser.add_option("-h", "--help", action="store_true",
                   help="Show this help message and exit.")
 parser.add_option("-y", "--assume_yes", action="store_true",
@@ -599,32 +594,11 @@ group.add_option("-s", "--server", action="store", dest="server",
 group.add_option("-e", "--email", action="store", dest="email",
                  metavar="EMAIL", default=None,
                  help="The username to use. Will prompt if omitted.")
-group.add_option("-H", "--host", action="store", dest="host",
-                 metavar="HOST", default=None,
-                 help="Overrides the Host header sent with all RPCs.")
-group.add_option("--no_cookies", action="store_false",
-                 dest="save_cookies", default=True,
-                 help="Do not save authentication cookies to local disk.")
-group.add_option("--oauth2", action="store_true",
-                 dest="use_oauth2", default=False,
-                 help="Use OAuth 2.0 instead of a password.")
-group.add_option("--oauth2_port", action="store", type="int",
-                 dest="oauth2_port", default=DEFAULT_OAUTH2_PORT,
-                 help=("Port to use to handle OAuth 2.0 redirect. Must be an "
-                       "integer in the range 1024-49151, defaults to "
-                       "'%default'."))
-group.add_option("--no_oauth2_webbrowser", action="store_false",
-                 dest="open_oauth2_local_webbrowser", default=True,
-                 help="Don't open a browser window to get an access token.")
-group.add_option("--account_type", action="store", dest="account_type",
-                 metavar="TYPE", default=AUTH_ACCOUNT_TYPE,
-                 choices=["GOOGLE", "HOSTED"],
-                 help=("Override the default account type "
-                       "(defaults to '%default', "
-                       "valid choices are 'GOOGLE' and 'HOSTED')."))
 group.add_option("-j", "--number-parallel-uploads",
                  dest="num_upload_threads", default=8,
                  help="Number of uploads to do in parallel.")
+# Authentication
+auth.add_auth_options(parser)
 # Issue
 group = parser.add_option_group("Issue options")
 group.add_option("-t", "--title", action="store", dest="title",
@@ -654,6 +628,17 @@ group.add_option("--base_url", action="store", dest="base_url", default=None,
                  help="Base URL path for files (listed as \"Base URL\" when "
                  "viewing issue).  If omitted, will be guessed automatically "
                  "for SVN repos and left blank for others.")
+group.add_option("--target_ref", action="store", dest="target_ref",
+                 default=None,
+                 help="The target ref that is transitively tracked by the "
+                 "local branch this patch comes from.")
+parser.add_option("--cq_dry_run", action="store_true",
+                  help="Send the patchset to do a CQ dry run right after "
+                       "upload.")
+parser.add_option("--depends_on_patchset", action="store",
+                  dest="depends_on_patchset",
+                  help="The uploaded patchset this patchset depends on. The "
+                       "value will be in this format- issue_num:patchset_num")
 group.add_option("--download_base", action="store_true",
                  dest="download_base", default=False,
                  help="Base files will be downloaded by the server "
@@ -680,8 +665,11 @@ group.add_option("--emulate_svn_auto_props", action="store_true",
 group = parser.add_option_group("Git-specific options")
 group.add_option("--git_similarity", action="store", dest="git_similarity",
                  metavar="SIM", type="int", default=50,
-                 help=("Set the minimum similarity index for detecting renames "
-                       "and copies. See `git diff -C`. (default 50)."))
+                 help=("Set the minimum similarity percentage for detecting "
+                       "renames and copies. See `git diff -C`. (default 50)."))
+group.add_option("--git_only_search_patch", action="store_false", default=True,
+                 dest='git_find_copies_harder',
+                 help="Removes --find-copies-harder when seaching for copies")
 group.add_option("--git_no_find_copies", action="store_false", default=True,
                  dest="git_find_copies",
                  help=("Prevents git from looking for copies (default off)."))
@@ -700,150 +688,6 @@ group.add_option("--p4_client", action="store", dest="p4_client",
 group.add_option("--p4_user", action="store", dest="p4_user",
                  metavar="P4_USER", default=None,
                  help=("Perforce user"))
-
-
-# OAuth 2.0 Methods and Helpers
-class ClientRedirectServer(BaseHTTPServer.HTTPServer):
-  """A server for redirects back to localhost from the associated server.
-
-  Waits for a single request and parses the query parameters for an access token
-  or an error and then stops serving.
-  """
-  access_token = None
-  error = None
-
-
-class ClientRedirectHandler(BaseHTTPServer.BaseHTTPRequestHandler):
-  """A handler for redirects back to localhost from the associated server.
-
-  Waits for a single request and parses the query parameters into the server's
-  access_token or error and then stops serving.
-  """
-
-  def SetResponseValue(self):
-    """Stores the access token or error from the request on the server.
-
-    Will only do this if exactly one query parameter was passed in to the
-    request and that query parameter used 'access_token' or 'error' as the key.
-    """
-    query_string = urlparse.urlparse(self.path).query
-    query_params = urlparse.parse_qs(query_string)
-
-    if len(query_params) == 1:
-      if query_params.has_key(ACCESS_TOKEN_PARAM):
-        access_token_list = query_params[ACCESS_TOKEN_PARAM]
-        if len(access_token_list) == 1:
-          self.server.access_token = access_token_list[0]
-      else:
-        error_list = query_params.get(ERROR_PARAM, [])
-        if len(error_list) == 1:
-          self.server.error = error_list[0]
-
-  def do_GET(self):
-    """Handle a GET request.
-
-    Parses and saves the query parameters and prints a message that the server
-    has completed its lone task (handling a redirect).
-
-    Note that we can't detect if an error occurred.
-    """
-    self.send_response(200)
-    self.send_header('Content-type', 'text/html')
-    self.end_headers()
-    self.SetResponseValue()
-    self.wfile.write(AUTH_HANDLER_RESPONSE)
-
-  def log_message(self, format, *args):
-    """Do not log messages to stdout while running as command line program."""
-    pass
-
-
-def OpenOAuth2ConsentPage(server=DEFAULT_REVIEW_SERVER,
-                          port=DEFAULT_OAUTH2_PORT):
-  """Opens the OAuth 2.0 consent page or prints instructions how to.
-
-  Uses the webbrowser module to open the OAuth server side page in a browser.
-
-  Args:
-    server: String containing the review server URL. Defaults to
-      DEFAULT_REVIEW_SERVER.
-    port: Integer, the port where the localhost server receiving the redirect
-      is serving. Defaults to DEFAULT_OAUTH2_PORT.
-
-  Returns:
-    A boolean indicating whether the page opened successfully.
-  """
-  path = OAUTH_PATH_PORT_TEMPLATE % {'port': port}
-  parsed_url = urlparse.urlparse(server)
-  scheme = parsed_url[0] or 'https'
-  if scheme != 'https':
-    ErrorExit('Using OAuth requires a review server with SSL enabled.')
-  # If no scheme was given on command line the server address ends up in
-  # parsed_url.path otherwise in netloc.
-  host = parsed_url[1] or parsed_url[2]
-  page = '%s://%s%s' % (scheme, host, path)
-  page_opened = webbrowser.open(page, new=1, autoraise=True)
-  if page_opened:
-    print OPEN_LOCAL_MESSAGE_TEMPLATE % (page,)
-  return page_opened
-
-
-def WaitForAccessToken(port=DEFAULT_OAUTH2_PORT):
-  """Spins up a simple HTTP Server to handle a single request.
-
-  Intended to handle a single redirect from the production server after the
-  user authenticated via OAuth 2.0 with the server.
-
-  Args:
-    port: Integer, the port where the localhost server receiving the redirect
-      is serving. Defaults to DEFAULT_OAUTH2_PORT.
-
-  Returns:
-    The access token passed to the localhost server, or None if no access token
-      was passed.
-  """
-  httpd = ClientRedirectServer((LOCALHOST_IP, port), ClientRedirectHandler)
-  # Wait to serve just one request before deferring control back
-  # to the caller of wait_for_refresh_token
-  httpd.handle_request()
-  if httpd.access_token is None:
-    ErrorExit(httpd.error or OAUTH_DEFAULT_ERROR_MESSAGE)
-  return httpd.access_token
-
-
-def GetAccessToken(server=DEFAULT_REVIEW_SERVER, port=DEFAULT_OAUTH2_PORT,
-                   open_local_webbrowser=True):
-  """Gets an Access Token for the current user.
-
-  Args:
-    server: String containing the review server URL. Defaults to
-      DEFAULT_REVIEW_SERVER.
-    port: Integer, the port where the localhost server receiving the redirect
-      is serving. Defaults to DEFAULT_OAUTH2_PORT.
-    open_local_webbrowser: Boolean, defaults to True. If set, opens a page in
-      the user's browser.
-
-  Returns:
-    A string access token that was sent to the local server. If the serving page
-      via WaitForAccessToken does not receive an access token, this method
-      returns None.
-  """
-  access_token = None
-  if open_local_webbrowser:
-    page_opened = OpenOAuth2ConsentPage(server=server, port=port)
-    if page_opened:
-      try:
-        access_token = WaitForAccessToken(port=port)
-      except socket.error, e:
-        print 'Can\'t start local webserver. Socket Error: %s\n' % (e.strerror,)
-
-  if access_token is None:
-    # TODO(dhermes): Offer to add to clipboard using xsel, xclip, pbcopy, etc.
-    page = 'https://%s%s' % (server, OAUTH_PATH)
-    print NO_OPEN_LOCAL_MESSAGE_TEMPLATE % (page,)
-    access_token = raw_input('Enter access token: ').strip()
-
-  return access_token
 
 
 class KeyringCreds(object):
@@ -891,46 +735,25 @@ class KeyringCreds(object):
     return (email, password)
 
 
-class OAuth2Creds(object):
-  """Simple object to hold server and port to be passed to GetAccessToken."""
-
-  def __init__(self, server, port, open_local_webbrowser=True):
-    self.server = server
-    self.port = port
-    self.open_local_webbrowser = open_local_webbrowser
-
-  def __call__(self):
-    """Uses stored server and port to retrieve OAuth 2.0 access token."""
-    return GetAccessToken(server=self.server, port=self.port,
-                          open_local_webbrowser=self.open_local_webbrowser)
-
-
-def GetRpcServer(server, email=None, host_override=None, save_cookies=True,
-                 account_type=AUTH_ACCOUNT_TYPE, use_oauth2=False,
-                 oauth2_port=DEFAULT_OAUTH2_PORT,
-                 open_oauth2_local_webbrowser=True):
+def GetRpcServer(server, auth_config=None, email=None):
   """Returns an instance of an AbstractRpcServer.
 
   Args:
     server: String containing the review server URL.
-    email: String containing user's email address.
-    host_override: If not None, string containing an alternate hostname to use
-      in the host header.
-    save_cookies: Whether authentication cookies should be saved to disk.
-    account_type: Account type for authentication, either 'GOOGLE'
-      or 'HOSTED'. Defaults to AUTH_ACCOUNT_TYPE.
-    use_oauth2: Boolean indicating whether OAuth 2.0 should be used for
-      authentication.
-    oauth2_port: Integer, the port where the localhost server receiving the
-      redirect is serving. Defaults to DEFAULT_OAUTH2_PORT.
-    open_oauth2_local_webbrowser: Boolean, defaults to True. If True and using
-      OAuth, this opens a page in the user's browser to obtain a token.
+    auth_config: auth.AuthConfig tuple with OAuth2 configuration.
+    email: String containing user's email address [deprecated].
 
   Returns:
     A new HttpRpcServer, on which RPC calls can be made.
   """
+  # If email is given as an empty string or no auth config is passed, then
+  # assume we want to make requests that do not need authentication. Bypass
+  # authentication by setting the auth_function to None.
+  if email == '' or not auth_config:
+    return HttpRpcServer(server, None)
+
   # If this is the dev_appserver, use fake authentication.
-  host = (host_override or server).lower()
+  host = server.lower()
   if re.match(r'(http://)?localhost([:/]|$)', host):
     if email is None:
       email = "test@example.com"
@@ -938,25 +761,38 @@ def GetRpcServer(server, email=None, host_override=None, save_cookies=True,
     server = HttpRpcServer(
         server,
         lambda: (email, "password"),
-        host_override=host_override,
         extra_headers={"Cookie":
                        'dev_appserver_login="%s:False"' % email},
-        save_cookies=save_cookies,
-        account_type=account_type)
+        save_cookies=auth_config.save_cookies,
+        account_type=AUTH_ACCOUNT_TYPE)
     # Don't try to talk to ClientLogin.
     server.authenticated = True
     return server
 
-  positional_args = [server]
-  if use_oauth2:
-    positional_args.append(
-        OAuth2Creds(server, oauth2_port, open_oauth2_local_webbrowser))
+  if auth_config.use_oauth2:
+    auth_func = auth.get_authenticator_for_host(server, auth_config)
   else:
-    positional_args.append(KeyringCreds(server, host, email).GetUserCredentials)
-  return HttpRpcServer(*positional_args,
-                       host_override=host_override,
-                       save_cookies=save_cookies,
-                       account_type=account_type)
+    auth_func = KeyringCreds(server, host, email).GetUserCredentials
+
+  # HACK(crbug.com/476690): Internal Rietveld is configured to require cookie
+  # auth for all paths except /bots/* (requests to /bots/* are authenticated
+  # with OAuth). /bots/* paths expose exact same API as /* (at least enough of
+  # it for depot_tools to work). So when using OAuth with internal Rietveld,
+  # silently prefix all requests with '/bots'.
+  request_path_prefix = ''
+  if auth_config.use_oauth2:
+    if not host.startswith(('http://', 'https://')):
+      host = 'https://' + host
+    parsed = urlparse.urlparse(host)
+    if parsed.netloc.endswith('.googleplex.com'):
+      request_path_prefix = '/bots'
+
+  return HttpRpcServer(
+      server,
+      auth_func,
+      request_path_prefix=request_path_prefix,
+      save_cookies=auth_config.save_cookies,
+      account_type=AUTH_ACCOUNT_TYPE)
 
 
 def EncodeMultipartFormData(fields, files):
@@ -972,7 +808,7 @@ def EncodeMultipartFormData(fields, files):
   Source:
     http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/146306
   """
-  BOUNDARY = '-M-A-G-I-C---B-O-U-N-D-A-R-Y-'
+  BOUNDARY = '-M-A-G-I-C---B-O-U-N-D-A-R-Y-%s-' % sum(hash(f) for f in files)
   CRLF = '\r\n'
   lines = []
   for (key, value) in fields:
@@ -1009,7 +845,7 @@ use_shell = sys.platform.startswith("win")
 def RunShellWithReturnCodeAndStderr(command, print_output=False,
                            universal_newlines=True,
                            env=os.environ):
-  """Executes a command and returns the output from stdout, stderr and the return code.
+  """Run a command and return output from stdout, stderr and the return code.
 
   Args:
     command: Command to execute.
@@ -1040,7 +876,7 @@ def RunShellWithReturnCodeAndStderr(command, print_output=False,
   p.wait()
   errout = p.stderr.read()
   if print_output and errout:
-    print >>sys.stderr, errout
+    print >> sys.stderr, errout
   p.stdout.close()
   p.stderr.close()
   return output, errout, p.returncode
@@ -1048,7 +884,7 @@ def RunShellWithReturnCodeAndStderr(command, print_output=False,
 def RunShellWithReturnCode(command, print_output=False,
                            universal_newlines=True,
                            env=os.environ):
-  """Executes a command and returns the output from stdout and the return code."""
+  """Run a command and return output from stdout and the return code."""
   out, err, retcode = RunShellWithReturnCodeAndStderr(command, print_output,
                            universal_newlines, env)
   return out, retcode
@@ -1223,7 +1059,8 @@ class VersionControlSystem(object):
     mimetype =  mimetypes.guess_type(filename)[0]
     if not mimetype:
       return False
-    return mimetype.startswith("image/") and not mimetype.startswith("image/svg")
+    return (mimetype.startswith("image/") and
+            not mimetype.startswith("image/svg"))
 
   def IsBinaryData(self, data):
     """Returns true if data contains a null byte."""
@@ -1269,21 +1106,21 @@ class SubversionVCS(VersionControlSystem):
     """
     url = self._GetInfo("URL")
     if url:
-        scheme, netloc, path, params, query, fragment = urlparse.urlparse(url)
-        guess = ""
-        # TODO(anatoli) - repository specific hacks should be handled by server
-        if netloc == "svn.python.org" and scheme == "svn+ssh":
-          path = "projects" + path
-          scheme = "http"
-          guess = "Python "
-        elif netloc.endswith(".googlecode.com"):
-          scheme = "http"
-          guess = "Google Code "
-        path = path + "/"
-        base = urlparse.urlunparse((scheme, netloc, path, params,
-                                    query, fragment))
-        LOGGER.info("Guessed %sbase = %s", guess, base)
-        return base
+      scheme, netloc, path, params, query, fragment = urlparse.urlparse(url)
+      guess = ""
+      # TODO(anatoli) - repository specific hacks should be handled by server
+      if netloc == "svn.python.org" and scheme == "svn+ssh":
+        path = "projects" + path
+        scheme = "http"
+        guess = "Python "
+      elif netloc.endswith(".googlecode.com"):
+        scheme = "http"
+        guess = "Google Code "
+      path = path + "/"
+      base = urlparse.urlunparse((scheme, netloc, path, params,
+                                  query, fragment))
+      LOGGER.info("Guessed %sbase = %s", guess, base)
+      return base
     if required:
       ErrorExit("Can't find URL in output from svn info")
     return None
@@ -1338,9 +1175,10 @@ class SubversionVCS(VersionControlSystem):
     }
 
     def repl(m):
-       if m.group(2):
-         return "$%s::%s$" % (m.group(1), " " * len(m.group(3)))
-       return "$%s$" % m.group(1)
+      if m.group(2):
+        return "$%s::%s$" % (m.group(1), " " * len(m.group(3)))
+      return "$%s$" % m.group(1)
+
     keywords = [keyword
                 for name in keyword_str.split(" ")
                 for keyword in svn_keywords.get(name, [])]
@@ -1393,7 +1231,8 @@ class SubversionVCS(VersionControlSystem):
         if returncode:
           # Directory might not yet exist at start revison
           # svn: Unable to find repository location for 'abc' in revision nnn
-          if re.match('^svn: Unable to find repository location for .+ in revision \d+', err):
+          if re.match('^svn: Unable to find repository location '
+                      'for .+ in revision \d+', err):
             old_files = ()
           else:
             ErrorExit("Failed to get status for %s:\n%s" % (filename, err))
@@ -1615,16 +1454,18 @@ class GitVCS(VersionControlSystem):
     # append a diff (with rename detection), without deletes.
     cmd = [
         "git", "diff", "--no-color", "--no-ext-diff", "--full-index",
-        "--ignore-submodules",
+        "--ignore-submodules", "--src-prefix=a/", "--dst-prefix=b/",
     ]
     diff = RunShell(
         cmd + ["--no-renames", "--diff-filter=D"] + extra_args,
         env=env, silent_ok=True)
+    assert 0 <= self.options.git_similarity <= 100
     if self.options.git_find_copies:
-      similarity_options = ["--find-copies-harder", "-l100000",
-                            "-C%s" % self.options.git_similarity ]
+      similarity_options = ["-l100000", "-C%d%%" % self.options.git_similarity]
+      if self.options.git_find_copies_harder:
+        similarity_options.append("--find-copies-harder")
     else:
-      similarity_options = ["-M%s" % self.options.git_similarity ]
+      similarity_options = ["-M%d%%" % self.options.git_similarity ]
     diff += RunShell(
         cmd + ["--diff-filter=AMCRT"] + similarity_options + extra_args,
         env=env, silent_ok=True)
@@ -2085,7 +1926,7 @@ class PerforceVCS(VersionControlSystem):
       line_count = len(diffData.file_body.splitlines())
       diffData.change_summary = "@@ -0,0 +1"
       if line_count > 1:
-          diffData.change_summary += ",%d" % line_count
+        diffData.change_summary += ",%d" % line_count
       diffData.change_summary += " @@"
       diffData.prefix = "+"
       return diffData
@@ -2564,16 +2405,9 @@ def RealMain(argv, data=None):
   files = vcs.GetBaseFiles(data)
   if verbosity >= 1:
     print "Upload server:", options.server, "(change with -s/--server)"
-  if options.use_oauth2:
-    options.save_cookies = False
-  rpc_server = GetRpcServer(options.server,
-                            options.email,
-                            options.host,
-                            options.save_cookies,
-                            options.account_type,
-                            options.use_oauth2,
-                            options.oauth2_port,
-                            options.open_oauth2_local_webbrowser)
+
+  auth_config = auth.extract_auth_config_from_options(options)
+  rpc_server = GetRpcServer(options.server, auth_config, options.email)
   form_fields = []
 
   repo_guid = vcs.GetGUID()
@@ -2601,6 +2435,13 @@ def RealMain(argv, data=None):
     form_fields.append(("cc", options.cc))
   if options.project:
     form_fields.append(("project", options.project))
+  if options.target_ref:
+    form_fields.append(("target_ref", options.target_ref))
+  if options.cq_dry_run:
+    form_fields.append(("cq_dry_run", "1"))
+    form_fields.append(("commit", "1"))
+  if options.depends_on_patchset:
+    form_fields.append(("depends_on_patchset", options.depends_on_patchset))
 
   # Process --message, --title and --file.
   message = options.message or ""
@@ -2707,6 +2548,9 @@ def main():
   except KeyboardInterrupt:
     print
     StatusUpdate("Interrupted.")
+    sys.exit(1)
+  except auth.AuthenticationError as e:
+    print >> sys.stderr, e
     sys.exit(1)
 
 

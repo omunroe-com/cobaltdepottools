@@ -39,6 +39,7 @@ import urllib2  # Exposed through the API.
 from warnings import warn
 
 # Local imports.
+import auth
 import fix_encoding
 import gclient_utils
 import owners
@@ -292,6 +293,7 @@ class InputApi(object):
     self.os_listdir = os.listdir
     self.os_walk = os.walk
     self.os_path = os.path
+    self.os_stat = os.stat
     self.pickle = pickle
     self.marshal = marshal
     self.re = re
@@ -308,6 +310,14 @@ class InputApi(object):
 
     # InputApi.platform is the platform you're currently running on.
     self.platform = sys.platform
+
+    self.cpu_count = multiprocessing.cpu_count()
+
+    # this is done here because in RunTests, the current working directory has
+    # changed, which causes Pool() to explode fantastically when run on windows
+    # (because it tries to load the __main__ module, which imports lots of
+    # things relative to the current working directory).
+    self._run_tests_pool = multiprocessing.Pool(self.cpu_count)
 
     # The local path of the currently-being-processed presubmit script.
     self._current_presubmit_path = os.path.dirname(presubmit_path)
@@ -488,11 +498,8 @@ class InputApi(object):
         if self.verbose:
           t.info = _PresubmitNotifyResult
     if len(tests) > 1 and parallel:
-      pool = multiprocessing.Pool()
       # async recipe works around multiprocessing bug handling Ctrl-C
-      msgs.extend(pool.map_async(CallCommand, tests).get(99999))
-      pool.close()
-      pool.join()
+      msgs.extend(self._run_tests_pool.map_async(CallCommand, tests).get(99999))
     else:
       msgs.extend(map(CallCommand, tests))
     return [m for m in msgs if m]
@@ -1142,6 +1149,37 @@ class GetTryMastersExecuter(object):
     return get_preferred_try_masters(project, change)
 
 
+class GetPostUploadExecuter(object):
+  @staticmethod
+  def ExecPresubmitScript(script_text, presubmit_path, cl, change):
+    """Executes PostUploadHook() from a single presubmit script.
+
+    Args:
+      script_text: The text of the presubmit script.
+      presubmit_path: Project script to run.
+      cl: The Changelist object.
+      change: The Change object.
+
+    Return:
+      A list of results objects.
+    """
+    context = {}
+    try:
+      exec script_text in context
+    except Exception, e:
+      raise PresubmitFailure('"%s" had an exception.\n%s'
+                             % (presubmit_path, e))
+
+    function_name = 'PostUploadHook'
+    if function_name not in context:
+      return {}
+    post_upload_hook = context[function_name]
+    if not len(inspect.getargspec(post_upload_hook)[0]) == 3:
+      raise PresubmitFailure(
+          'Expected function "PostUploadHook" to take three arguments.')
+    return post_upload_hook(cl, change, OutputApi(False))
+
+
 def DoGetTrySlaves(change,
                    changed_files,
                    repository_root,
@@ -1259,6 +1297,49 @@ def DoGetTryMasters(change,
 
   if results and verbose:
     output_stream.write('%s\n' % str(results))
+  return results
+
+
+def DoPostUploadExecuter(change,
+                         cl,
+                         repository_root,
+                         verbose,
+                         output_stream):
+  """Execute the post upload hook.
+
+  Args:
+    change: The Change object.
+    cl: The Changelist object.
+    repository_root: The repository root.
+    verbose: Prints debug info.
+    output_stream: A stream to write debug output to.
+  """
+  presubmit_files = ListRelevantPresubmitFiles(
+      change.LocalPaths(), repository_root)
+  if not presubmit_files and verbose:
+    output_stream.write("Warning, no PRESUBMIT.py found.\n")
+  results = []
+  executer = GetPostUploadExecuter()
+  # The root presubmit file should be executed after the ones in subdirectories.
+  # i.e. the specific post upload hooks should run before the general ones.
+  # Thus, reverse the order provided by ListRelevantPresubmitFiles.
+  presubmit_files.reverse()
+
+  for filename in presubmit_files:
+    filename = os.path.abspath(filename)
+    if verbose:
+      output_stream.write("Running %s\n" % filename)
+    # Accept CRLF presubmit script.
+    presubmit_script = gclient_utils.FileRead(filename, 'rU')
+    results.extend(executer.ExecPresubmitScript(
+        presubmit_script, filename, cl, change))
+  output_stream.write('\n')
+  if results:
+    output_stream.write('** Post Upload Hook Messages **\n')
+  for result in results:
+    result.handle(output_stream)
+    output_stream.write('\n')
+
   return results
 
 
@@ -1530,7 +1611,7 @@ def CallCommand(cmd_data):
     return cmd_data.info('%s (%4.2fs)' % (cmd_data.name, duration))
 
 
-def Main(argv):
+def main(argv=None):
   parser = optparse.OptionParser(usage="%prog [options] <files...>",
                                  version="%prog " + str(__version__))
   parser.add_option("-c", "--commit", action="store_true", default=False,
@@ -1562,7 +1643,6 @@ def Main(argv):
                     "to skip multiple canned checks.")
   parser.add_option("--rietveld_url", help=optparse.SUPPRESS_HELP)
   parser.add_option("--rietveld_email", help=optparse.SUPPRESS_HELP)
-  parser.add_option("--rietveld_password", help=optparse.SUPPRESS_HELP)
   parser.add_option("--rietveld_fetch", action='store_true', default=False,
                     help=optparse.SUPPRESS_HELP)
   # These are for OAuth2 authentication for bots. See also apply_issue.py
@@ -1571,7 +1651,9 @@ def Main(argv):
 
   parser.add_option("--trybot-json",
                     help="Output trybot information to the file specified.")
+  auth.add_auth_options(parser)
   options, args = parser.parse_args(argv)
+  auth_config = auth.extract_auth_config_from_options(options)
 
   if options.verbose >= 2:
     logging.basicConfig(level=logging.DEBUG)
@@ -1583,9 +1665,6 @@ def Main(argv):
   if options.rietveld_email and options.rietveld_email_file:
     parser.error("Only one of --rietveld_email or --rietveld_email_file "
                  "can be passed to this program.")
-  if options.rietveld_private_key_file and options.rietveld_password:
-    parser.error("Only one of --rietveld_private_key_file or "
-                 "--rietveld_password can be passed to this program.")
 
   if options.rietveld_email_file:
     with open(options.rietveld_email_file, "rb") as f:
@@ -1607,8 +1686,8 @@ def Main(argv):
     else:
       rietveld_obj = rietveld.CachingRietveld(
         options.rietveld_url,
-        options.rietveld_email,
-        options.rietveld_password)
+        auth_config,
+        options.rietveld_email)
     if options.rietveld_fetch:
       assert options.issue
       props = rietveld_obj.get_issue_properties(options.issue, False)
@@ -1674,4 +1753,8 @@ def Main(argv):
 
 if __name__ == '__main__':
   fix_encoding.fix_encoding()
-  sys.exit(Main(None))
+  try:
+    sys.exit(main())
+  except KeyboardInterrupt:
+    sys.stderr.write('interrupted\n')
+    sys.exit(1)

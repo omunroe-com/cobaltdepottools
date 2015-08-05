@@ -19,6 +19,7 @@ Branches are colorized as follows:
     * Note that multiple branches may be Cyan, if they are all on the same
       commit, and you have that commit checked out.
   * Green - a local branch
+  * Blue - a 'branch-heads' branch
   * Magenta - a tag
   * Magenta '{NO UPSTREAM}' - If you have local branches which do not track any
     upstream, then you will see this.
@@ -27,12 +28,14 @@ Branches are colorized as follows:
 import argparse
 import collections
 import sys
+import subprocess2
 
 from third_party import colorama
 from third_party.colorama import Fore, Style
 
 from git_common import current_branch, upstream, tags, get_branches_info
 from git_common import get_git_version, MIN_UPSTREAM_TRACK_GIT_VERSION, hash_one
+from git_common import run
 
 DEFAULT_SEPARATOR = ' ' * 4
 
@@ -107,6 +110,8 @@ class BranchMapper(object):
 
   def __init__(self):
     self.verbosity = 0
+    self.maxjobs = 0
+    self.show_subject = False
     self.output = OutputManager()
     self.__gone_branches = set()
     self.__branches_info = None
@@ -114,10 +119,25 @@ class BranchMapper(object):
     self.__current_branch = None
     self.__current_hash = None
     self.__tag_set = None
+    self.__status_info = {}
 
   def start(self):
     self.__branches_info = get_branches_info(
         include_tracking_status=self.verbosity >= 1)
+    if (self.verbosity >= 2):
+      # Avoid heavy import unless necessary.
+      from git_cl import get_cl_statuses, color_for_status
+
+      status_info = get_cl_statuses(self.__branches_info.keys(),
+                                    fine_grained=self.verbosity > 2,
+                                    max_processes=self.maxjobs)
+
+      for _ in xrange(len(self.__branches_info)):
+        # This is a blocking get which waits for the remote CL status to be
+        # retrieved.
+        (branch, url, status) = status_info.next()
+        self.__status_info[branch] = (url, color_for_status(status))
+
     roots = set()
 
     # A map of parents to a list of their children.
@@ -126,7 +146,7 @@ class BranchMapper(object):
         continue
 
       parent = branch_info.upstream
-      if parent and not self.__branches_info[parent]:
+      if not self.__branches_info[parent]:
         branch_upstream = upstream(branch)
         # If git can't find the upstream, mark the upstream as gone.
         if branch_upstream:
@@ -156,6 +176,8 @@ class BranchMapper(object):
   def __color_for_branch(self, branch, branch_hash):
     if branch.startswith('origin'):
       color = Fore.RED
+    elif branch.startswith('branch-heads'):
+      color = Fore.BLUE
     elif self.__is_invalid_parent(branch) or branch in self.__tag_set:
       color = Fore.MAGENTA
     elif self.__current_hash.startswith(branch_hash):
@@ -163,7 +185,7 @@ class BranchMapper(object):
     else:
       color = Fore.GREEN
 
-    if self.__current_hash.startswith(branch_hash):
+    if branch_hash and self.__current_hash.startswith(branch_hash):
       color += Style.BRIGHT
     else:
       color += Style.NORMAL
@@ -177,7 +199,10 @@ class BranchMapper(object):
     if branch_info:
       branch_hash = branch_info.hash
     else:
-      branch_hash = hash_one(branch, short=True)
+      try:
+        branch_hash = hash_one(branch, short=True)
+      except subprocess2.CalledProcessError:
+        branch_hash = None
 
     line = OutputLine()
 
@@ -231,10 +256,13 @@ class BranchMapper(object):
 
     # The Rietveld issue associated with the branch.
     if self.verbosity >= 2:
-      import git_cl  # avoid heavy import cost unless we need it
       none_text = '' if self.__is_invalid_parent(branch) else 'None'
-      url = git_cl.Changelist(branchref=branch).GetIssueURL()
-      line.append(url or none_text, color=Fore.BLUE if url else Fore.WHITE)
+      (url, color) = self.__status_info[branch]
+      line.append(url or none_text, color=color)
+
+    # The subject of the most recent commit on the branch.
+    if self.show_subject:
+      line.append(run('log', '-n1', '--format=%s', branch))
 
     self.output.append(line)
 
@@ -257,14 +285,26 @@ def main(argv):
                       help='Display branch hash and Rietveld URL')
   parser.add_argument('--no-color', action='store_true', dest='nocolor',
                       help='Turn off colors.')
+  parser.add_argument(
+      '-j', '--maxjobs', action='store', type=int,
+      help='The number of jobs to use when retrieving review status')
+  parser.add_argument('--show-subject', action='store_true',
+                      dest='show_subject', help='Show the commit subject.')
 
-  opts = parser.parse_args(argv[1:])
+  opts = parser.parse_args(argv)
 
   mapper = BranchMapper()
   mapper.verbosity = opts.v
   mapper.output.nocolor = opts.nocolor
+  mapper.maxjobs = opts.maxjobs
+  mapper.show_subject = opts.show_subject
   mapper.start()
   print mapper.output.as_formatted_string()
+  return 0
 
 if __name__ == '__main__':
-  sys.exit(main(sys.argv))
+  try:
+    sys.exit(main(sys.argv[1:]))
+  except KeyboardInterrupt:
+    sys.stderr.write('interrupted\n')
+    sys.exit(1)

@@ -21,17 +21,18 @@ setup_gitgit
   git add test; git commit -q -m "branch work"
 
   test_expect_success "git-cl upload wants a server" \
-    "$GIT_CL upload 2>&1 | grep -q 'You must configure'"
+    "$GIT_CL upload --no-oauth2 2>&1 | grep -q 'You must configure'"
 
   git config rietveld.server localhost:10000
 
+  # echo $($GIT_CL_STATUS)
   test_expect_success "git-cl status has no issue" \
-    "$GIT_CL_STATUS | grep -q 'no issue'"
+    "$GIT_CL_STATUS | grep -q 'No issue assigned'"
 
   # Prevent the editor from coming up when you upload.
   export GIT_EDITOR=$(which true)
   test_expect_success "upload succeeds (needs a server running on localhost)" \
-    "$GIT_CL upload -m test master | grep -q 'Issue created'"
+    "$GIT_CL upload  --no-oauth2  -m test master | grep -q 'Issue created'"
 
   test_expect_success "git-cl status now knows the issue" \
     "$GIT_CL_STATUS | grep -q 'Issue number'"
@@ -44,11 +45,12 @@ setup_gitgit
        --data-urlencode xsrf_token="$(print_xsrf_token)" \
        $URL/edit
 
+  API=$(echo $URL | sed -e 's/\([0-9]\+\)$/api\/\1/')
   test_expect_success "Base URL contains branch name" \
-      "curl -s $($GIT_CL_STATUS --field=url) | grep 'URL:[[:space:]]*[^<]' | grep -q '@master'"
+      "curl -s $API | python -mjson.tool | grep base_url | grep -q '@master'"
 
   test_expect_success "git-cl land ok" \
-    "$GIT_CL land -f"
+    "$GIT_CL land -f --no-oauth2"
 
   git checkout -q master > /dev/null 2>&1
   git pull -q > /dev/null 2>&1

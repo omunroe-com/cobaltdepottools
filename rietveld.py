@@ -37,32 +37,15 @@ upload.LOGGER.setLevel(logging.WARNING)  # pylint: disable=E1103
 
 class Rietveld(object):
   """Accesses rietveld."""
-  def __init__(self, url, email, password, extra_headers=None):
+  def __init__(
+      self, url, auth_config, email=None, extra_headers=None, maxtries=None):
     self.url = url.rstrip('/')
-    # Email and password are accessed by commit queue, keep them.
-    self.email = email
-    self.password = password
-    # TODO(maruel): It's not awesome but maybe necessary to retrieve the value.
-    # It happens when the presubmit check is ran out of process, the cookie
-    # needed to be recreated from the credentials. Instead, it should pass the
-    # email and the cookie.
-    if email and password:
-      get_creds = lambda: (email, password)
-      self.rpc_server = upload.HttpRpcServer(
-            self.url,
-            get_creds,
-            extra_headers=extra_headers or {})
-    else:
-      if email == '':
-        # If email is given as an empty string, then assume we want to make
-        # requests that do not need authentication.  Bypass authentication by
-        # setting the auth_function to None.
-        self.rpc_server = upload.HttpRpcServer(url, None)
-      else:
-        self.rpc_server = upload.GetRpcServer(url, email)
+    self.rpc_server = upload.GetRpcServer(self.url, auth_config, email)
 
     self._xsrf_token = None
     self._xsrf_token_time = None
+
+    self._maxtries = maxtries or 40
 
   def xsrf_token(self):
     if (not self._xsrf_token_time or
@@ -100,6 +83,20 @@ class Rietveld(object):
     data = json.loads(self.get(url, retry_on_404=True))
     data['description'] = '\n'.join(data['description'].strip().splitlines())
     return data
+
+  def get_depends_on_patchset(self, issue, patchset):
+    """Returns the patchset this patchset depends on if it exists."""
+    url = '/%d/patchset/%d/get_depends_on_patchset' % (issue, patchset)
+    resp = None
+    try:
+      resp = json.loads(self.get(url))
+    except (urllib2.HTTPError, ValueError):
+      # The get_depends_on_patchset endpoint does not exist on this Rietveld
+      # instance yet. Ignore the error and proceed.
+      # TODO(rmistry): Make this an error when all Rietveld instances have
+      # this endpoint.
+      pass
+    return resp
 
   def get_patchset_properties(self, issue, patchset):
     """Returns the patchset properties."""
@@ -337,11 +334,12 @@ class Rietveld(object):
 
   def trigger_try_jobs(
       self, issue, patchset, reason, clobber, revision, builders_and_tests,
-      master=None):
+      master=None, category='cq'):
     """Requests new try jobs.
 
     |builders_and_tests| is a map of builders: [tests] to run.
     |master| is the name of the try master the builders belong to.
+    |category| is used to distinguish regular jobs and experimental jobs.
 
     Returns the keys of the new TryJobResult entites.
     """
@@ -350,6 +348,7 @@ class Rietveld(object):
       ('clobber', 'True' if clobber else 'False'),
       ('builders', json.dumps(builders_and_tests)),
       ('xsrf_token', self.xsrf_token()),
+      ('category', category),
     ]
     if revision:
       params.append(('revision', revision))
@@ -361,15 +360,17 @@ class Rietveld(object):
     return self.post('/%d/try/%d' % (issue, patchset), params)
 
   def trigger_distributed_try_jobs(
-      self, issue, patchset, reason, clobber, revision, masters):
+      self, issue, patchset, reason, clobber, revision, masters,
+      category='cq'):
     """Requests new try jobs.
 
     |masters| is a map of masters: map of builders: [tests] to run.
+    |category| is used to distinguish regular jobs and experimental jobs.
     """
     for (master, builders_and_tests) in masters.iteritems():
       self.trigger_try_jobs(
           issue, patchset, reason, clobber, revision, builders_and_tests,
-          master)
+          master, category)
 
   def get_pending_try_jobs(self, cursor=None, limit=100):
     """Retrieves the try job requests in pending state.
@@ -409,8 +410,7 @@ class Rietveld(object):
         old_error_exit(msg)
       upload.ErrorExit = trap_http_500
 
-      maxtries = 40
-      for retry in xrange(maxtries):
+      for retry in xrange(self._maxtries):
         try:
           logging.debug('%s' % request_path)
           result = self.rpc_server.Send(request_path, **kwargs)
@@ -418,7 +418,7 @@ class Rietveld(object):
           # How nice.
           return result
         except urllib2.HTTPError, e:
-          if retry >= (maxtries - 1):
+          if retry >= (self._maxtries - 1):
             raise
           flake_codes = [500, 502, 503]
           if retry_on_404:
@@ -426,14 +426,14 @@ class Rietveld(object):
           if e.code not in flake_codes:
             raise
         except urllib2.URLError, e:
-          if retry >= (maxtries - 1):
+          if retry >= (self._maxtries - 1):
             raise
           if (not 'Name or service not known' in e.reason and
               not 'EOF occurred in violation of protocol' in e.reason):
             # Usually internal GAE flakiness.
             raise
         except ssl.SSLError, e:
-          if retry >= (maxtries - 1):
+          if retry >= (self._maxtries - 1):
             raise
           if not 'timed out' in str(e):
             raise
@@ -571,17 +571,16 @@ class JwtOAuth2Rietveld(Rietveld):
                client_email,
                client_private_key_file,
                private_key_password=None,
-               extra_headers=None):
-
-    # These attributes are accessed by commit queue. Keep them.
-    self.email = client_email
-    self.private_key_file = client_private_key_file
+               extra_headers=None,
+               maxtries=None):
 
     if private_key_password is None:  # '' means 'empty password'
       private_key_password = 'notasecret'
 
     self.url = url.rstrip('/')
-    bot_url = self.url + '/bots'
+    bot_url = self.url
+    if self.url.endswith('googleplex.com'):
+      bot_url = self.url + '/bots'
 
     with open(client_private_key_file, 'rb') as f:
       client_private_key = f.read()
@@ -593,6 +592,8 @@ class JwtOAuth2Rietveld(Rietveld):
                                      extra_headers=extra_headers or {})
     self._xsrf_token = None
     self._xsrf_token_time = None
+
+    self._maxtries = maxtries or 40
 
 
 class CachingRietveld(Rietveld):
@@ -670,14 +671,6 @@ class ReadOnlyRietveld(object):
   def url(self):
     return self._rietveld.url
 
-  @property
-  def email(self):
-    return self._rietveld.email
-
-  @property
-  def password(self):
-    return self._rietveld.password
-
   def get_pending_issues(self):
     pending_issues = self._rietveld.get_pending_issues()
 
@@ -697,6 +690,9 @@ class ReadOnlyRietveld(object):
 
   def get_patchset_properties(self, issue, patchset):
     return self._rietveld.get_patchset_properties(issue, patchset)
+
+  def get_depends_on_patchset(self, issue, patchset):
+    return self._rietveld.get_depends_on_patchset(issue, patchset)
 
   def get_patch(self, issue, patchset):
     return self._rietveld.get_patch(issue, patchset)
@@ -719,11 +715,12 @@ class ReadOnlyRietveld(object):
 
   def trigger_try_jobs(  # pylint:disable=R0201
       self, issue, patchset, reason, clobber, revision, builders_and_tests,
-      master=None):
+      master=None, category='cq'):
     logging.info('ReadOnlyRietveld: triggering try jobs %r for issue %d' %
         (builders_and_tests, issue))
 
   def trigger_distributed_try_jobs(  # pylint:disable=R0201
-      self, issue, patchset, reason, clobber, revision, masters):
+      self, issue, patchset, reason, clobber, revision, masters,
+      category='cq'):
     logging.info('ReadOnlyRietveld: triggering try jobs %r for issue %d' %
         (masters, issue))

@@ -15,14 +15,10 @@ import sys
 import threading
 import time
 
-from download_from_google_storage import check_bucket_permissions
 from download_from_google_storage import get_sha1
 from download_from_google_storage import Gsutil
 from download_from_google_storage import printer_worker
-
-GSUTIL_DEFAULT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    'third_party', 'gsutil', 'gsutil')
+from download_from_google_storage import GSUTIL_DEFAULT_PATH
 
 USAGE_STRING = """%prog [options] target [target2 ...].
 Target is the file intended to be uploaded to Google Storage.
@@ -71,7 +67,7 @@ def get_md5_cached(filename):
 
 def _upload_worker(
     thread_num, upload_queue, base_url, gsutil, md5_lock, force,
-    use_md5, stdout_queue, ret_codes):
+    use_md5, stdout_queue, ret_codes, gzip):
   while True:
     filename, sha1_sum = upload_queue.get()
     if not filename:
@@ -96,7 +92,11 @@ def _upload_worker(
           continue
     stdout_queue.put('%d> Uploading %s...' % (
         thread_num, filename))
-    code, _, err = gsutil.check_call('cp', '-q', filename, file_url)
+    gsutil_args = ['cp']
+    if gzip:
+      gsutil_args.extend(['-z', gzip])
+    gsutil_args.extend([filename, file_url])
+    code, _, err = gsutil.check_call(*gsutil_args)
     if code != 0:
       ret_codes.put(
           (code,
@@ -133,7 +133,7 @@ def get_targets(args, parser, use_null_terminator):
 
 def upload_to_google_storage(
     input_filenames, base_url, gsutil, force,
-    use_md5, num_threads, skip_hashing):
+    use_md5, num_threads, skip_hashing, gzip):
   # We only want one MD5 calculation happening at a time to avoid HD thrashing.
   md5_lock = threading.Lock()
 
@@ -151,7 +151,7 @@ def upload_to_google_storage(
     t = threading.Thread(
         target=_upload_worker,
         args=[thread_num, upload_queue, base_url, gsutil, md5_lock,
-              force, use_md5, stdout_queue, ret_codes])
+              force, use_md5, stdout_queue, ret_codes, gzip])
     t.daemon = True
     t.start()
     all_threads.append(t)
@@ -207,7 +207,7 @@ def upload_to_google_storage(
   return max_ret_code
 
 
-def main(args):
+def main():
   parser = optparse.OptionParser(USAGE_STRING)
   parser.add_option('-b', '--bucket',
                     help='Google Storage bucket to upload to.')
@@ -227,6 +227,9 @@ def main(args):
                     help='Use \\0 instead of \\n when parsing '
                     'the file list from stdin.  This is useful if the input '
                     'is coming from "find ... -print0".')
+  parser.add_option('-z', '--gzip', metavar='ext',
+                    help='Gzip files which end in ext. '
+                         'ext is a comma-separated list')
   (options, args) = parser.parse_args()
 
   # Enumerate our inputs.
@@ -234,8 +237,7 @@ def main(args):
 
   # Make sure we can find a working instance of gsutil.
   if os.path.exists(GSUTIL_DEFAULT_PATH):
-    gsutil = Gsutil(GSUTIL_DEFAULT_PATH, boto_path=options.boto,
-                    bypass_prodaccess=True)
+    gsutil = Gsutil(GSUTIL_DEFAULT_PATH, boto_path=options.boto)
   else:
     gsutil = None
     for path in os.environ["PATH"].split(os.pathsep):
@@ -245,15 +247,16 @@ def main(args):
       parser.error('gsutil not found in %s, bad depot_tools checkout?' %
                    GSUTIL_DEFAULT_PATH)
 
-  # Check we have a valid bucket with valid permissions.
-  base_url, code = check_bucket_permissions(options.bucket, gsutil)
-  if code:
-    return code
+  base_url = 'gs://%s' % options.bucket
 
   return upload_to_google_storage(
       input_filenames, base_url, gsutil, options.force, options.use_md5,
-      options.num_threads, options.skip_hashing)
+      options.num_threads, options.skip_hashing, options.gzip)
 
 
 if __name__ == '__main__':
-  sys.exit(main(sys.argv))
+  try:
+    sys.exit(main())
+  except KeyboardInterrupt:
+    sys.stderr.write('interrupted\n')
+    sys.exit(1)

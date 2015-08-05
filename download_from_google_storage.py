@@ -20,8 +20,7 @@ import subprocess2
 
 
 GSUTIL_DEFAULT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    'third_party', 'gsutil', 'gsutil')
+    os.path.dirname(os.path.abspath(__file__)), 'gsutil.py')
 # Maps sys.platform to what we actually want to call them.
 PLATFORM_MAPPING = {
     'cygwin': 'win',
@@ -55,13 +54,13 @@ def GetNormalizedPlatform():
 class Gsutil(object):
   """Call gsutil with some predefined settings.  This is a convenience object,
   and is also immutable."""
-  def __init__(self, path, boto_path, timeout=None, bypass_prodaccess=False):
+  def __init__(self, path, boto_path=None, timeout=None, version='4.7'):
     if not os.path.exists(path):
       raise FileNotFoundError('GSUtil not found in %s' % path)
     self.path = path
     self.timeout = timeout
     self.boto_path = boto_path
-    self.bypass_prodaccess = bypass_prodaccess
+    self.version = version
 
   def get_sub_env(self):
     env = os.environ.copy()
@@ -71,25 +70,16 @@ class Gsutil(object):
     elif self.boto_path:
       env['AWS_CREDENTIAL_FILE'] = self.boto_path
       env['BOTO_CONFIG'] = self.boto_path
-    else:
-      custompath = env.get('AWS_CREDENTIAL_FILE', '~/.boto') + '.depot_tools'
-      custompath = os.path.expanduser(custompath)
-      if os.path.exists(custompath):
-        env['AWS_CREDENTIAL_FILE'] = custompath
 
     return env
 
   def call(self, *args):
-    cmd = [sys.executable, self.path]
-    if self.bypass_prodaccess:
-      cmd.append('--bypass_prodaccess')
+    cmd = [sys.executable, self.path, '--force-version', self.version]
     cmd.extend(args)
     return subprocess2.call(cmd, env=self.get_sub_env(), timeout=self.timeout)
 
   def check_call(self, *args):
-    cmd = [sys.executable, self.path]
-    if self.bypass_prodaccess:
-      cmd.append('--bypass_prodaccess')
+    cmd = [sys.executable, self.path, '--force-version', self.version]
     cmd.extend(args)
     ((out, err), code) = subprocess2.communicate(
         cmd,
@@ -105,26 +95,9 @@ class Gsutil(object):
     if ('You are attempting to access protected data with '
           'no configured credentials.' in err):
       return (403, out, err)
-    if 'No such object' in err:
+    if 'matched no objects' in err:
       return (404, out, err)
     return (code, out, err)
-
-
-def check_bucket_permissions(bucket, gsutil):
-  if not bucket:
-    print >> sys.stderr, 'Missing bucket %s.'
-    return (None, 1)
-  base_url = 'gs://%s' % bucket
-
-  code, _, ls_err = gsutil.check_call('ls', base_url)
-  if code != 0:
-    print >> sys.stderr, ls_err
-  if code == 403:
-    print >> sys.stderr, 'Got error 403 while authenticating to %s.' % base_url
-    print >> sys.stderr, 'Try running "download_from_google_storage --config".'
-  elif code == 404:
-    print >> sys.stderr, '%s not found.' % base_url
-  return (base_url, code)
 
 
 def check_platform(target):
@@ -163,8 +136,7 @@ def enumerate_work_queue(input_filename, work_queue, directory,
     with open(input_filename, 'rb') as f:
       sha1_match = re.match('^([A-Za-z0-9]{40})$', f.read(1024).rstrip())
       if sha1_match:
-        work_queue.put(
-            (sha1_match.groups(1)[0], input_filename.replace('.sha1', '')))
+        work_queue.put((sha1_match.groups(1)[0], output))
         return 1
     if not ignore_errors:
       raise InvalidFileError('No sha1 sum found in %s.' % input_filename)
@@ -229,19 +201,41 @@ def _downloader_worker_thread(thread_num, q, force, base_url,
         continue
     # Check if file exists.
     file_url = '%s/%s' % (base_url, input_sha1_sum)
-    if gsutil.check_call('ls', file_url)[0] != 0:
-      out_q.put('%d> File %s for %s does not exist, skipping.' % (
-          thread_num, file_url, output_filename))
-      ret_codes.put((1, 'File %s for %s does not exist.' % (
-          file_url, output_filename)))
+    (code, _, err) = gsutil.check_call('ls', file_url)
+    if code != 0:
+      if code == 404:
+        out_q.put('%d> File %s for %s does not exist, skipping.' % (
+            thread_num, file_url, output_filename))
+        ret_codes.put((1, 'File %s for %s does not exist.' % (
+            file_url, output_filename)))
+      else:
+        # Other error, probably auth related (bad ~/.boto, etc).
+        out_q.put('%d> Failed to fetch file %s for %s, skipping. [Err: %s]' % (
+            thread_num, file_url, output_filename, err))
+        ret_codes.put((1, 'Failed to fetch file %s for %s. [Err: %s]' % (
+            file_url, output_filename, err)))
       continue
     # Fetch the file.
-    out_q.put('%d> Downloading %s...' % (
-        thread_num, output_filename))
-    code, _, err = gsutil.check_call('cp', '-q', file_url, output_filename)
+    out_q.put('%d> Downloading %s...' % (thread_num, output_filename))
+    try:
+      os.remove(output_filename)  # Delete the file if it exists already.
+    except OSError:
+      if os.path.exists(output_filename):
+        out_q.put('%d> Warning: deleting %s failed.' % (
+            thread_num, output_filename))
+    code, _, err = gsutil.check_call('cp', file_url, output_filename)
     if code != 0:
       out_q.put('%d> %s' % (thread_num, err))
       ret_codes.put((code, err))
+      continue
+
+    remote_sha1 = get_sha1(output_filename)
+    if remote_sha1 != input_sha1_sum:
+      msg = ('%d> ERROR remote sha1 (%s) does not match expected sha1 (%s).' %
+             (thread_num, remote_sha1, input_sha1_sum))
+      out_q.put(msg)
+      ret_codes.put((20, msg))
+      continue
 
     # Set executable bit.
     if sys.platform == 'cygwin':
@@ -254,15 +248,11 @@ def _downloader_worker_thread(thread_num, q, force, base_url,
     elif sys.platform != 'win32':
       # On non-Windows platforms, key off of the custom header
       # "x-goog-meta-executable".
-      #
-      # TODO(hinoka): It is supposedly faster to use "gsutil stat" but that
-      # doesn't appear to be supported by the gsutil currently in our tree. When
-      # we update, this code should use that instead of "gsutil ls -L".
-      code, out, _ = gsutil.check_call('ls', '-L', file_url)
+      code, out, _ = gsutil.check_call('stat', file_url)
       if code != 0:
         out_q.put('%d> %s' % (thread_num, err))
         ret_codes.put((code, err))
-      elif re.search('x-goog-meta-executable:', out):
+      elif re.search(r'executable:\s*1', out):
         st = os.stat(output_filename)
         os.chmod(output_filename, st.st_mode | stat.S_IEXEC)
 
@@ -394,21 +384,34 @@ def main(args):
 
   # Set the boto file to /dev/null if we don't need auth.
   if options.no_auth:
-    options.boto = os.devnull
+    if (set(('http_proxy', 'https_proxy')).intersection(
+        env.lower() for env in os.environ) and
+        'NO_AUTH_BOTO_CONFIG' not in os.environ):
+      print >> sys.stderr, ('NOTICE: You have PROXY values set in your '
+                            'environment, but gsutil in depot_tools does not '
+                            '(yet) obey them.')
+      print >> sys.stderr, ('Also, --no_auth prevents the normal BOTO_CONFIG '
+                            'environment variable from being used.')
+      print >> sys.stderr, ('To use a proxy in this situation, please supply '
+                            'those settings in a .boto file pointed to by '
+                            'the NO_AUTH_BOTO_CONFIG environment var.')
+    options.boto = os.environ.get('NO_AUTH_BOTO_CONFIG', os.devnull)
 
   # Make sure gsutil exists where we expect it to.
   if os.path.exists(GSUTIL_DEFAULT_PATH):
     gsutil = Gsutil(GSUTIL_DEFAULT_PATH,
-                    boto_path=options.boto,
-                    bypass_prodaccess=options.no_auth)
+                    boto_path=options.boto)
   else:
     parser.error('gsutil not found in %s, bad depot_tools checkout?' %
                  GSUTIL_DEFAULT_PATH)
 
   # Passing in -g/--config will run our copy of GSUtil, then quit.
   if options.config:
-    return gsutil.call('config', '-r', '-o',
-                       os.path.expanduser('~/.boto.depot_tools'))
+    print '===Note from depot_tools==='
+    print 'If you do not have a project ID, enter "0" when asked for one.'
+    print '===End note from depot_tools==='
+    print
+    return gsutil.call('config')
 
   if not args:
     parser.error('Missing target.')
@@ -452,10 +455,7 @@ def main(args):
       parser.error('Output file %s exists and --no_resume is specified.'
                    % options.output)
 
-  # Check we have a valid bucket with valid permissions.
-  base_url, code = check_bucket_permissions(options.bucket, gsutil)
-  if code:
-    return code
+  base_url = 'gs://%s' % options.bucket
 
   return download_from_google_storage(
       input_filename, base_url, gsutil, options.num_threads, options.directory,

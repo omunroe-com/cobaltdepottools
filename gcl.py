@@ -23,6 +23,7 @@ import urllib2
 import breakpad  # pylint: disable=W0611
 
 
+import auth
 import fix_encoding
 import gclient_utils
 import git_cl
@@ -45,6 +46,9 @@ CODEREVIEW_SETTINGS = {
 # globals that store the root of the current repository and the directory where
 # we store information about changelists.
 REPOSITORY_ROOT = ""
+
+# Replacement for project name.
+SWITCH_TO_GIT = "SWITCH_TO_GIT_ALREADY"
 
 # Filename where we store repository specific information for gcl.
 CODEREVIEW_SETTINGS_FILE = "codereview.settings"
@@ -351,7 +355,10 @@ class ChangeInfo(object):
     if not self._rpc_server:
       if not self.rietveld:
         ErrorExit(CODEREVIEW_SETTINGS_FILE_NOT_FOUND)
-      self._rpc_server = rietveld.CachingRietveld(self.rietveld, None, None)
+      # TODO(vadimsh): glc.py should be deleted soon. Do not bother much about
+      # authentication options and always use defaults.
+      self._rpc_server = rietveld.CachingRietveld(
+          self.rietveld, auth.make_auth_config())
     return self._rpc_server
 
   def CloseIssue(self):
@@ -875,6 +882,10 @@ def CMDupload(change_info, args):
       # Uploading a new patchset.
       upload_arg.append("--issue=%d" % change_info.issue)
 
+      project = GetCodeReviewSetting("PROJECT")
+      if project:
+        upload_arg.append("--project=%s" % SWITCH_TO_GIT)
+
       if not any(i.startswith('--title') or i.startswith('-t') for i in args):
         upload_arg.append('--title= ')
     else:
@@ -915,7 +926,7 @@ def CMDupload(change_info, args):
 
       project = GetCodeReviewSetting("PROJECT")
       if project:
-        upload_arg.append("--project=%s" % project)
+        upload_arg.append("--project=%s" % SWITCH_TO_GIT)
 
     # If we have a lot of files with long paths, then we won't be able to fit
     # the command to "svn diff".  Instead, we generate the diff manually for
@@ -1465,6 +1476,10 @@ def main(argv):
         '\nYour python version %s is unsupported, please upgrade.\n' %
         sys.version.split(' ', 1)[0])
     return 2
+
+  sys.stderr.write('Warning: gcl is going away soon. Get off subversion!\n')
+  sys.stderr.write('See http://crbug.com/475321 for more details.\n')
+
   if not argv:
     argv = ['help']
   command = Command(argv[0])
@@ -1511,4 +1526,8 @@ def main(argv):
 
 if __name__ == "__main__":
   fix_encoding.fix_encoding()
-  sys.exit(main(sys.argv[1:]))
+  try:
+    sys.exit(main(sys.argv[1:]))
+  except KeyboardInterrupt:
+    sys.stderr.write('interrupted\n')
+    sys.exit(1)

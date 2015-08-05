@@ -16,9 +16,13 @@ fi
 OUTPUT="$(uname | grep 'MINGW')"
 MINGW=$?
 
-base_dir=$(dirname "$0")
-if [ -L "$base_dir" ]; then
-  base_dir=`cd "$base_dir" && pwd -P`
+if [ $MINGW = 0 ]; then
+  base_dir="${0%/*}"
+else
+  base_dir=$(dirname "$0")
+  if [ -L "$base_dir" ]; then
+    base_dir=`cd "$base_dir" && pwd -P`
+  fi
 fi
 
 # Don't try to use Cygwin tools.  Get real win32 tools using the batch script.
@@ -140,11 +144,20 @@ if [ "X$DEPOT_TOOLS_UPDATE" != "X0" -a -e "$base_dir/.svn" ]
 then
   # Update the root directory to stay up-to-date with the latest depot_tools.
   BEFORE_REVISION=$(get_svn_revision)
+  if echo $* | grep -e --force > /dev/null; then
+    "$SVN" -q revert -R "$base_dir"
+  fi
   "$SVN" -q up "$base_dir"
   AFTER_REVISION=$(get_svn_revision)
   if [[ "$BEFORE_REVISION" != "$AFTER_REVISION" ]]; then
-    echo "Depot Tools has been updated to revision $AFTER_REVISION." 1>&2
+    if [ -z "$DEPOT_TOOLS_HIDE_UPDATED_MESSAGE" ]; then
+      echo "Depot Tools has been updated to revision $AFTER_REVISION." 1>&2
+    fi
   fi
 fi
 
 find "$base_dir" -iname "*.pyc" -exec rm {} \;
+
+# Initialize/update virtualenv.
+cd $base_dir
+python -u ./bootstrap/bootstrap.py --deps_file bootstrap/deps.pyl --quiet ENV
