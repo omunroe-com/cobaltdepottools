@@ -1967,18 +1967,22 @@ def GerritUpload(options, args, cl, change):
   """upload the current branch to gerrit."""
   # We assume the remote called "origin" is the one we want.
   # It is probably not worthwhile to support different workflows.
-  remote = 'origin'
-  branch = 'master'
+  gerrit_remote = 'origin'
 
-  if options.target_branch:
-    remote = 'origin'
-    branch = options.target_branch
-  elif settings.GetIsGerritAutoDetectBranch() == 'true':
+  remote, remote_branch = cl.GetRemoteBranch()
+
+  # Cobalt modifications for auto-detection of target branch.
+  if settings.GetIsGerritAutoDetectBranch() == 'true':
     retcode, result = RunGitWithCode(['rev-parse', '--abbrev-ref', '@{u}'])
     if retcode != 0:
-      print('Unable to auto-detect remote branch.')
+      print 'Unable to auto-detect remote branch.'
       return 1
-    remote, branch = result.strip().split('/')
+    auto_remote, branch = result.strip().split('/')
+    if remote != auto_remote:
+      print 'Unexpected remote mismatch: %s != %s' % (remote, auto_remote)
+  else:
+    branch = GetTargetRef(remote, remote_branch, options.target_branch,
+                          pending_prefix='')
 
   change_desc = ChangeDescription(
       options.message or CreateDescriptionFromLog(args))
