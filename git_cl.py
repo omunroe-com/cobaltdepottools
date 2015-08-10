@@ -411,7 +411,6 @@ class Settings(object):
     self.viewvc_url = None
     self.updated = False
     self.is_gerrit = None
-    self.is_gerrit_autodetect_branch = None
     self.git_editor = None
     self.project = None
     self.force_https_commit_url = None
@@ -576,13 +575,6 @@ class Settings(object):
     if self.is_gerrit is None:
       self.is_gerrit = self._GetConfig('gerrit.host', error_ok=True)
     return self.is_gerrit
-
-  def GetIsGerritAutoDetectBranch(self):
-    """Return true if the remote branch should be auto-detected."""
-    if self.is_gerrit_autodetect_branch is None:
-      self.is_gerrit_autodetect_branch = self._GetConfig(
-          'gerrit.autodetect-branch', error_ok=True)
-    return self.is_gerrit_autodetect_branch
 
   def GetGitEditor(self):
     """Return the editor specified in the git config, or None if none is."""
@@ -1372,10 +1364,6 @@ def LoadCodereviewSettingsFromFile(fileobj):
   if 'GERRIT_HOST' in keyvals:
     RunGit(['config', 'gerrit.host', keyvals['GERRIT_HOST']])
 
-  if 'GERRIT_AUTODETECT_BRANCH' in keyvals:
-    RunGit(['config', 'gerrit.autodetect-branch',
-            keyvals['GERRIT_AUTODETECT_BRANCH']])
-
   if 'PUSH_URL_CONFIG' in keyvals and 'ORIGIN_URL_CONFIG' in keyvals:
     #should be of the form
     #PUSH_URL_CONFIG: url.ssh://gitrw.chromium.org.pushinsteadof
@@ -1971,18 +1959,8 @@ def GerritUpload(options, args, cl, change):
 
   remote, remote_branch = cl.GetRemoteBranch()
 
-  # Cobalt modifications for auto-detection of target branch.
-  if settings.GetIsGerritAutoDetectBranch() == 'true':
-    retcode, result = RunGitWithCode(['rev-parse', '--abbrev-ref', '@{u}'])
-    if retcode != 0:
-      print 'Unable to auto-detect remote branch.'
-      return 1
-    auto_remote, branch = result.strip().split('/')
-    if remote != auto_remote:
-      print 'Unexpected remote mismatch: %s != %s' % (remote, auto_remote)
-  else:
-    branch = GetTargetRef(remote, remote_branch, options.target_branch,
-                          pending_prefix='')
+  branch = GetTargetRef(remote, remote_branch, options.target_branch,
+                        pending_prefix='')
 
   change_desc = ChangeDescription(
       options.message or CreateDescriptionFromLog(args))
