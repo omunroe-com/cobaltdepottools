@@ -5493,8 +5493,11 @@ _HEADERS_CONTAINING_TEMPLATES = (
 
     # gcc extensions.
     # Note: std::hash is their hash, ::hash is our hash
-    ('<hash_map>', ('hash_map', 'hash_multimap',)),
-    ('<hash_set>', ('hash_set', 'hash_multiset',)),
+    # NOTE(rjogrady): In Cobalt's version of Chromium, we use base/hash_tables.h
+    #('<hash_map>', ('hash_map', 'hash_multimap',)),
+    #('<hash_set>', ('hash_set', 'hash_multiset',)),
+    ('base/hash_tables.h', ('hash_map', 'hash_multimap',)),
+    ('base/hash_tables.h', ('hash_set', 'hash_multiset',)),
     ('<slist>', ('slist',)),
     )
 
