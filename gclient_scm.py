@@ -741,9 +741,16 @@ class GitWrapper(SCMWrapper):
       self.Print('________ couldn\'t run status in %s:\n'
                  'The directory does not exist.' % self.checkout_path)
     else:
-      merge_base = self._Capture(['merge-base', 'HEAD', self.remote])
+      if not self._GetCurrentBranch():
+        self.Print('________ No branch in %s, skipping\n' % self.checkout_path)
+        return
+
+      upstream = scm.GIT.GetUpstreamBranch(self.checkout_path)
+      merge_base = self._Capture(['merge-base', 'HEAD', upstream])
+      # Note(rjogrady): Always print to stdout, otherwise this only shows
+      # up when verbose output is enabled.
       self._Run(['diff', '--name-status', merge_base], options,
-                stdout=self.out_fh)
+                stdout=sys.stdout, print_stdout=True)
       if file_list is not None:
         files = self._Capture(['diff', '--name-only', merge_base]).split()
         file_list.extend([os.path.join(self.checkout_path, f) for f in files])
