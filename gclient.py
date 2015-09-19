@@ -1522,11 +1522,6 @@ been automagically updated.  The previous version is available at %s.old.
       print >> sys.stderr, ('Please fix your script, having invalid '
                             '--revision flags will soon considered an error.')
 
-    # Once all the dependencies have been processed, it's now safe to run the
-    # hooks.
-    if not self._options.nohooks:
-      self.RunHooksRecursively(self._options)
-
     if command == 'update':
       # Notify the user if there is an orphaned entry in their working copy.
       # Only delete the directory if there are no changes in it, and
@@ -1624,6 +1619,12 @@ been automagically updated.  The previous version is available at %s.old.
             gclient_utils.rmtree(e_dir)
       # record the current list of entries for next time
       self._SaveEntries()
+
+    # Once all the dependencies have been processed, it's now safe to run the
+    # hooks.
+    if not self._options.nohooks:
+      self.RunHooksRecursively(self._options)
+
     return 0
 
   def PrintRevInfo(self):
