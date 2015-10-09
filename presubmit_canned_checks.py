@@ -473,6 +473,31 @@ def CheckSvnProperty(input_api, output_api, prop, expected, affected_files):
   return []
 
 
+def CheckNoNonAsciiCharactersInFiles(input_api, output_api,
+                                     source_file_filter=None):
+  """Checks that there are no non-ASCII characters in any of the source files to
+  be submitted.
+  """
+  if not source_file_filter:
+    # It's the default filter.
+    source_file_filter = input_api.FilterSourceFile
+
+  def check_line(_, line):
+    for ch in line:
+      if (ch < ' ' or ch > '~') and ch not in ['\t', '\r', '\n']:
+        return False
+    return True
+
+  non_asciis = _FindNewViolationsOfRule(check_line, input_api,
+                                        source_file_filter)
+
+  if non_asciis:
+    return [output_api.PresubmitPromptWarning(
+                'Found non ASCII characters in:',
+                long_text='\n'.join(non_asciis))]
+  return []
+
+
 ### Other checks
 
 def CheckDoNotSubmit(input_api, output_api):
