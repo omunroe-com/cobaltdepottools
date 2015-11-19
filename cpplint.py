@@ -3024,6 +3024,17 @@ def CheckSpacing(filename, clean_lines, linenum, nesting_state, error):
   # reason.  This includes the first line after a block is opened, and
   # blank lines at the end of a function (ie, right before a line like '}'
   #
+  # Check if there is an empty line at the beginning or more than one
+  # consecutive empty lines.
+  if IsBlankLine(line):
+    if linenum == 1 and clean_lines.NumLines() > 2:
+      error(filename, linenum, 'whitespace/blank_line', 2,
+            'Redundant blank line at file beginning.')
+    if (linenum > 1 and IsBlankLine(raw[linenum - 1]) and
+        not IsBlankLine(raw[linenum - 2])):
+      error(filename, linenum, 'whitespace/blank_line', 2,
+            'Redundant blank line(s).')
+  #
   # Skip all the blank line checks if we are immediately inside a
   # namespace body.  In other words, don't issue blank line warnings
   # for this block:
