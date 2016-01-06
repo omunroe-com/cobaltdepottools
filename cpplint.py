@@ -772,6 +772,9 @@ class _CppLintState(object):
     # "vs7" - format that Microsoft Visual Studio 7 can parse
     self.output_format = 'emacs'
 
+    # True if the repo name should be included in the header guard.
+    self.header_guard_include_repo_name = False
+
   def SetOutputFormat(self, output_format):
     """Sets the output format for errors."""
     self.output_format = output_format
@@ -845,6 +848,9 @@ class _CppLintState(object):
                        (category, count))
     sys.stderr.write('Total errors found: %d\n' % self.error_count)
 
+  def SetHeaderGuardIncludeRepoName(self, val):
+    self.header_guard_include_repo_name = val
+
 _cpplint_state = _CppLintState()
 
 
@@ -909,6 +915,16 @@ def _BackupFilters():
 def _RestoreFilters():
   """ Restores filters previously backed up."""
   _cpplint_state.RestoreFilters()
+
+
+def _HeaderGuardIncludeRepoName():
+  return _cpplint_state.header_guard_include_repo_name
+
+
+def SetHeaderGuardIncludeRepoName(val):
+  """Set the prefix for header guard."""
+  _cpplint_state.SetHeaderGuardIncludeRepoName(val)
+
 
 class _FunctionState(object):
   """Tracks current function name and the number of lines in its body."""
@@ -984,6 +1000,14 @@ class FileInfo(object):
   def FullName(self):
     """Make Windows paths like Unix."""
     return os.path.abspath(self._filename).replace('\\', '/')
+
+  def GitRepositoryRoot(self):
+    fullname = self.FullName()
+    root_dir = os.path.dirname(fullname)
+    while (root_dir != os.path.dirname(root_dir) and not
+           os.path.exists(os.path.join(root_dir, '.git'))):
+      root_dir = os.path.dirname(root_dir)
+    return root_dir
 
   def RepositoryName(self):
     """FullName after removing the local path to the repository.
@@ -1666,9 +1690,13 @@ def GetHeaderGuardCPPVariable(filename):
   filename = re.sub(r'/\.flymake/([^/]*)$', r'/\1', filename)
   # Replace 'c++' with 'cpp'.
   filename = filename.replace('C++', 'cpp').replace('c++', 'cpp')
-  
+
   fileinfo = FileInfo(filename)
   file_path_from_root = fileinfo.RepositoryName()
+  if _HeaderGuardIncludeRepoName():
+    # Prefix the header guard with the git repo name.
+    repo_name = os.path.basename(fileinfo.GitRepositoryRoot())
+    file_path_from_root = repo_name + os.sep + file_path_from_root
   if _root:
     file_path_from_root = re.sub('^' + _root + os.sep, '', file_path_from_root)
   return re.sub(r'[^a-zA-Z0-9]', '_', file_path_from_root).upper() + '_'
@@ -4805,7 +4833,7 @@ def CheckLanguage(filename, clean_lines, linenum, file_extension,
 
   # Make Windows paths like Unix.
   fullname = os.path.abspath(filename).replace('\\', '/')
-  
+
   # Perform other checks now that we are sure that this is not an include line
   CheckCasts(filename, clean_lines, linenum, error)
   CheckGlobalStatic(filename, clean_lines, linenum, error)
@@ -6048,7 +6076,7 @@ def ProcessFileData(filename, file_extension, lines, error,
   nesting_state.CheckCompletedBlocks(filename, error)
 
   CheckForIncludeWhatYouUse(filename, clean_lines, include_state, error)
-  
+
   # Check that the .cc file has included its header if it exists.
   if file_extension == 'cc':
     CheckHeaderFileIncluded(filename, include_state, error)
