@@ -3394,8 +3394,6 @@ def CMDformat(parser, args):
                     help='Reformat the full content of all touched files')
   parser.add_option('--dry-run', action='store_true',
                     help='Don\'t modify any file on disk.')
-  parser.add_option('--python', action='store_true',
-                    help='Format python code with yapf (experimental).')
   parser.add_option('--diff', action='store_true',
                     help='Print diff to stdout rather than modifying files.')
   opts, args = parser.parse_args(args)
@@ -3476,26 +3474,20 @@ def CMDformat(parser, args):
 
   # Similar code to above, but using yapf on .py files rather than clang-format
   # on C/C++ files
-  if opts.python:
-    diff_cmd = BuildGitDiffCmd(diff_type, upstream_commit, args, ['.py'])
+  yapf_tool = gclient_utils.FindExecutable('pyformat')
+  if yapf_tool:
+    # NOTE(rjogrady): Hardcode 'full' for pyformat.
+    diff_cmd = BuildGitDiffCmd('--name-only', upstream_commit, args, ['.py'])
     diff_output = RunGit(diff_cmd)
-    yapf_tool = gclient_utils.FindExecutable('yapf')
-    if yapf_tool is None:
-      DieWithError('yapf not found in PATH')
 
-    if opts.full:
-      files = diff_output.splitlines()
-      if files:
-        cmd = [yapf_tool]
-        if not opts.dry_run and not opts.diff:
-          cmd.append('-i')
-        stdout = RunCommand(cmd + files, cwd=top_dir)
-        if opts.diff:
-          sys.stdout.write(stdout)
-    else:
-      # TODO(sbc): yapf --lines mode still has some issues.
-      # https://github.com/google/yapf/issues/154
-      DieWithError('--python currently only works with --full')
+    files = diff_output.splitlines()
+    if files:
+      cmd = [yapf_tool, '--yapf']
+      if not opts.dry_run and not opts.diff:
+        cmd.append('-i')
+      stdout = RunCommand(cmd + files, cwd=top_dir)
+      if opts.diff:
+        sys.stdout.write(stdout)
 
   # Build a diff command that only operates on dart files. dart's formatter
   # does not have the nice property of only operating on modified chunks, so
