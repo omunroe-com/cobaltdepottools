@@ -14,7 +14,11 @@ class Cobalt(recipe_util.Recipe):
 
   @staticmethod
   def fetch_spec(props):
-    ref = 'remotes/origin/COBALT'
+    branch = 'COBALT'
+    if props.get('branch'):
+      branch = props['branch']
+    ref = 'remotes/origin/%s' % branch
+
     url = 'https://lbshell-internal.googlesource.com/chromium.git@%s' % ref
     solution = { 'name'   :'src',
                  'url'    : url,
