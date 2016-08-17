@@ -40,9 +40,9 @@ IS_ENABLED = (
     _HOST_NAME.endswith(('.google.com', '.chromium.org')))
 
 
-# TODO(uzhilinsky): Disable breakpad to avoid spamming the Chromium team.
-# Eventually this should be re-enabled and the exceptions should be forwarded
-# to our own server.
+# TODO: COBALT: Disable breakpad to avoid spamming the Chromium team.
+# Eventually this should be re-enabled and the exceptions should be forwarded to
+# our own server.
 IS_ENABLED = False
 
 

@@ -1,4 +1,4 @@
-Ninja for Windows and Linux are custom built binaries that contain Steel
+Ninja for Windows and Linux are custom built binaries that contain H5VCC/Cobalt
 specific modifications.
 
 ninja.exe built with MSVC 2012

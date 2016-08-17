@@ -3476,7 +3476,7 @@ def CMDformat(parser, args):
   # on C/C++ files
   yapf_tool = gclient_utils.FindExecutable('pyformat')
   if yapf_tool:
-    # NOTE(rjogrady): Hardcode 'full' for pyformat.
+    # NOTE: COBALT: Hardcode 'full' for pyformat.
     diff_cmd = BuildGitDiffCmd('--name-only', upstream_commit, args, ['.py'])
     diff_output = RunGit(diff_cmd)
 

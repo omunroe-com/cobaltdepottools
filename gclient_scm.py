@@ -747,8 +747,8 @@ class GitWrapper(SCMWrapper):
 
       upstream = scm.GIT.GetUpstreamBranch(self.checkout_path)
       merge_base = self._Capture(['merge-base', 'HEAD', upstream])
-      # Note(rjogrady): Always print to stdout, otherwise this only shows
-      # up when verbose output is enabled.
+      # NOTE: COBALT: Always print to stdout, otherwise this only shows up when
+      # verbose output is enabled.
       self._Run(['diff', '--name-status', merge_base], options,
                 stdout=sys.stdout, print_stdout=True)
       if file_list is not None:
