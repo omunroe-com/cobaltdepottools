@@ -57,7 +57,7 @@ import watchlists
 
 __version__ = '1.0'
 
-DEFAULT_SERVER = 'https://codereview.appspot.com'
+DEFAULT_SERVER = 'https://cobalt-review.googlesource.com'
 POSTUPSTREAM_HOOK_PATTERN = '.git/hooks/post-cl-%s'
 DESCRIPTION_BACKUP_FILE = '~/.git_cl_description_backup'
 GIT_INSTRUCTIONS_URL = 'http://code.google.com/p/chromium/wiki/UsingGit'
