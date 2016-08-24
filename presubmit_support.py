@@ -657,7 +657,10 @@ class AffectedFile(object):
      This relies on the scm diff output describing each changed code section
      with a line of the form
 
-     ^@@ <old line num>,<old size> <new line num>,<new size> @@$
+     ^@@ -<old line num>[,<old size>] +<new line num>[,<new size>] @@$
+
+     Where if <old size> or <new size> is exactly 1, it will be ommitted. This
+     comes up for files that are, were, or are becoming a single line.
     """
     if self._cached_changed_contents is not None:
       return self._cached_changed_contents[:]
@@ -668,7 +671,7 @@ class AffectedFile(object):
       return []
 
     for line in self.GenerateScmDiff().splitlines():
-      m = re.match(r'^@@ [0-9\,\+\-]+ \+([0-9]+)\,[0-9]+ @@', line)
+      m = re.match(r'^@@ [0-9,+-]+ \+([0-9]+)(?:,[0-9]+)? @@$', line)
       if m:
         line_num = int(m.groups(1)[0])
         continue
