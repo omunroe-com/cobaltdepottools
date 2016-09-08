@@ -677,7 +677,8 @@ class AffectedFile(object):
         continue
       if line.startswith('+') and not line.startswith('++'):
         self._cached_changed_contents.append((line_num, line[1:]))
-      if not line.startswith('-'):
+      if (not line.startswith('-') and not
+          line.startswith('\ No newline at end of file')):
         line_num += 1
     return self._cached_changed_contents[:]
 
