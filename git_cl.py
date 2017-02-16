@@ -3389,7 +3389,7 @@ def BuildGitDiffCmd(diff_type, upstream_commit, args, extensions):
 @subcommand.usage('[files or directories to diff]')
 def CMDformat(parser, args):
   """Runs auto-formatting tools (clang-format etc.) on the diff."""
-  CLANG_EXTS = ['.cc', '.cpp', '.h', '.mm', '.proto', '.java']
+  CLANG_EXTS = ['.cc', '.cpp', '.h', '.mm', '.proto']
   parser.add_option('--full', action='store_true',
                     help='Reformat the full content of all touched files')
   parser.add_option('--dry-run', action='store_true',
@@ -3488,6 +3488,10 @@ def CMDformat(parser, args):
       stdout = RunCommand(cmd + files, cwd=top_dir)
       if opts.diff:
         sys.stdout.write(stdout)
+  else:
+    logging.warning(
+        'Unable to find "pyformat" on path.  Python files will not be '
+        'formatted.')
 
   # Build a diff command that only operates on dart files. dart's formatter
   # does not have the nice property of only operating on modified chunks, so
@@ -3508,6 +3512,23 @@ def CMDformat(parser, args):
     except dart_format.NotFoundError as e:
       print ('Unable to check dart code formatting. Dart SDK is not in ' +
              'this checkout.')
+
+  google_java_format_tool = gclient_utils.FindExecutable('google-java-format')
+  if google_java_format_tool:
+    diff_cmd = BuildGitDiffCmd('--name-only', upstream_commit, args, ['.java'])
+    diff_output = RunGit(diff_cmd)
+    files = diff_output.splitlines()
+    if files:
+      cmd = [google_java_format_tool]
+      if not opts.dry_run and not opts.diff:
+        cmd.append('-i')
+      stdout = RunCommand(cmd + files, cwd=top_dir)
+      if opts.diff:
+        sys.stdout.write(stdout)
+  else:
+    logging.warning(
+        'Unable to find "google-java-format" on path.  Java files will not be '
+        'formatted.')
 
   return return_value
 
