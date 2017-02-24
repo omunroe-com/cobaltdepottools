@@ -13,6 +13,7 @@
 # limitations under the License.
 """Gclient sync, retry if failed to connect."""
 
+import os
 import random
 import subprocess
 import sys
@@ -21,7 +22,7 @@ import time
 
 def main():
   command = [
-      'gclient',
+      ('gclient' if os.name != 'nt' else 'gclient.bat'),
       'sync',
       '--verbose',
       # Calls git reset --hard HEAD on each
