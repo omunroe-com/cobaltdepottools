@@ -37,6 +37,7 @@ def main():
 
   max_runs = 3
   fail_string = 'Failed to connect'
+  os.environ['GIT_CURL_VERBOSE'] = '1'
   for run in range(1, max_runs + 1):
     sys.stdout.write('Attempt %d\n' % run)
     p = subprocess.Popen(
