@@ -26,6 +26,7 @@ class Cobalt(recipe_util.Recipe):
                  'managed'   : True,
                  'custom_deps': {},
                  'safesync_url': '',
+                 'custom_vars': props,
     }
     spec = {
       'solutions': [solution],
