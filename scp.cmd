@@ -2,7 +2,7 @@
 @setlocal
 
 @rem Get the abolute path to the Git installation root.
-@for /F "delims=" %%I in ("%~dp0.\git-1.9.5.chromium.6_bin") do @set git_install_root=%%~fI
+@for /F "delims=" %%I in ("%~dp0.\git-*_bin") do @set git_install_root=%%~fI
 @set PATH=%git_install_root%\bin;%git_install_root%\mingw\bin;%PATH%
 
 :: Set the HOME variable to depot_tools (the parent of this directory's parent).
