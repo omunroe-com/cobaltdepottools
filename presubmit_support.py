@@ -671,7 +671,7 @@ class AffectedFile(object):
       return []
 
     for line in self.GenerateScmDiff().splitlines():
-      m = re.match(r'^@@ [0-9,+-]+ \+([0-9]+)(?:,[0-9]+)? @@$', line)
+      m = re.match(r'^@@ [0-9,+-]+ \+([0-9]+)(?:,[0-9]+)? @@', line)
       if m:
         line_num = int(m.groups(1)[0])
         continue
