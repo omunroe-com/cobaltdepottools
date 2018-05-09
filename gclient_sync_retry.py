@@ -52,8 +52,8 @@ def main():
     p_stdout, p_stderr = p.communicate()
     sys.stdout.write(p_stdout)
     sys.stderr.write(p_stderr)
-    contains_fail_string = ((f in p_stderr for f in fail_strings) or
-                            (f in p_stdout for f in fail_strings))
+    contains_fail_string = (any(f in p_stderr for f in fail_strings) or
+                            any(f in p_stdout for f in fail_strings))
 
     if not contains_fail_string:
       if p.returncode == 0:
