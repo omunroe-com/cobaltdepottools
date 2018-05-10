@@ -36,12 +36,10 @@ def main():
   print command
 
   max_runs = 6
-  fail_strings = ['Failed to connect', '502 Bad Gateway']
   os.environ['GIT_CURL_VERBOSE'] = '1'
 
-  # Whether any runs were successful or not.  Success is defined to be output
-  # that does not contain |fail_string|, as well as a zero exit code, as the
-  # gclient call could have failed for other reasons.
+  # Run command. If it fails, rerun with exponential backoff.
+  # Return 0 if it runs successfully, 1 if all retries fail.
   for run in range(1, max_runs + 1):
     sys.stdout.write('Attempt %d\n' % run)
     p = subprocess.Popen(
@@ -52,14 +50,9 @@ def main():
     p_stdout, p_stderr = p.communicate()
     sys.stdout.write(p_stdout)
     sys.stderr.write(p_stderr)
-    contains_fail_string = (any(f in p_stderr for f in fail_strings) or
-                            any(f in p_stdout for f in fail_strings))
 
-    if not contains_fail_string:
-      if p.returncode == 0:
-        return 0
-      sys.stdout.write('Sync returned failure but no retry case detected.\n')
-      break
+    if p.returncode == 0:
+      return 0
 
     if run < max_runs:
       sys.stdout.write('Sync failed. Retrying.\n')
