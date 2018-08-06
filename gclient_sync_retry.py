@@ -21,8 +21,9 @@ import time
 
 
 def main():
-  command = [
-      ('gclient' if os.name != 'nt' else 'gclient.bat'),
+  gclient_str = ('gclient' if os.name != 'nt' else 'gclient.bat')
+  sync_command = [
+      gclient_str,
       'sync',
       '--verbose',
       # Calls git reset --hard HEAD on each
@@ -33,17 +34,23 @@ def main():
       '--force'
   ]
 
-  print command
+  revert_command = [
+      gclient_str,
+      'revert',
+      '--verbose',
+  ]
+
+  print sync_command
 
   max_runs = 6
   os.environ['GIT_CURL_VERBOSE'] = '1'
 
-  # Run command. If it fails, rerun with exponential backoff.
+  # Run sync_command. If it fails, rerun with exponential backoff.
   # Return 0 if it runs successfully, 1 if all retries fail.
   for run in range(1, max_runs + 1):
     sys.stdout.write('Attempt %d\n' % run)
     p = subprocess.Popen(
-        command,
+        sync_command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.PIPE)
@@ -53,6 +60,17 @@ def main():
 
     if p.returncode == 0:
       return 0
+
+    if run == 1:
+      sys.stdout.write("Reverting uncommitted changes with:\n  " \
+                       + ' '.join(revert_command) + '\n')
+      p = subprocess.Popen(revert_command,
+                           stdout=subprocess.PIPE,
+                           stderr=subprocess.PIPE,
+                           stdin=subprocess.PIPE)
+      p_stdout, p_stderr = p.communicate()
+      sys.stdout.write(p_stdout)
+      sys.stderr.write(p_stderr)
 
     if run < max_runs:
       sys.stdout.write('Sync failed. Retrying.\n')
